@@ -59,6 +59,19 @@ def _resolve_read_path(path: str) -> Path:
     return (BASE_DIR.parent / p).resolve()
 
 
+def _outputs_path(path: str) -> Path:
+    """Resolve a path under outputs/, tolerating a leading 'outputs/' prefix.
+
+    The model may pass 'outputs/finance/x.md' or 'finance/x.md'; both resolve to
+    {OUTPUTS_DIR}/finance/x.md (no double-prefixing).
+    """
+    p = Path(path).expanduser()
+    parts = list(p.parts)
+    if parts and parts[0].lower() == "outputs":
+        p = Path(*parts[1:])
+    return _safe_path(str(p), OUTPUTS_DIR)
+
+
 def tool_get_time(fmt: str = "%Y-%m-%d %H:%M") -> str:
     return datetime.now().strftime(fmt)
 
@@ -89,14 +102,14 @@ def tool_read_file(path: str) -> str:
 
 
 def tool_write_file(path: str, content: str) -> str:
-    p = _safe_path(path, OUTPUTS_DIR)
+    p = _outputs_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content, encoding="utf-8")
     return f"wrote {len(content)} chars to {p}"
 
 
 def tool_append_file(path: str, content: str) -> str:
-    p = _safe_path(path, OUTPUTS_DIR)
+    p = _outputs_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
         fh.write(content if content.endswith("\n") else content + "\n")

@@ -7,6 +7,17 @@ from .config import get_settings
 from .llm import LLMClient, LLMError
 from .tools import Tool, build_tools, execute_tool
 
+GLOBAL_RULES = """
+COMMON RULES (apply to every task)
+- Never claim a side effect happened unless a tool actually confirmed it. Only state
+  that a file was saved after write_file/append_file returns a success message, or that
+  a transaction was recorded after ledger_add confirms it.
+- If you did not successfully call the tool, say the content is ready and offer to save
+  it. If a tool returned an error, report that error instead of pretending success.
+- If you are missing information that changes the answer, ask one focused question or
+  state your assumption explicitly and proceed.
+"""
+
 
 class Agent:
     def __init__(
@@ -17,7 +28,7 @@ class Agent:
         max_tokens: int = 2500,
     ) -> None:
         self.name = name
-        self.system_prompt = system_prompt.strip()
+        self.system_prompt = (system_prompt.strip() + GLOBAL_RULES).strip()
         self.tools = tools or build_tools(name)
         self.max_tokens = max_tokens
         self.client = LLMClient()

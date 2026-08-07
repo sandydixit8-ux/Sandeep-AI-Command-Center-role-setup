@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents_core.agent import Agent
 from agents_core.registry import get_agent, list_agents
+from agents_core.llm import _parse_failed_generation
 from agents_core.scoring import score_resume, extract_skills
 from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS
 
@@ -79,6 +80,9 @@ def main() -> int:
     print("\n== file tools ==")
     r5 = execute_tool(build_tools("exec"), "write_file", {"path": "notes.md", "content": "x"}, "exec")
     check("write_file ok", "wrote" in r5, r5)
+    r5b = execute_tool(build_tools("exec"), "write_file", {"path": "outputs/notes2.md", "content": "y"}, "exec")
+    check("write_file no double-prefix", "wrote" in r5b, r5b)
+    check("no outputs/outputs nesting", not (Path(os.environ["AGENT_OUTPUTS_DIR"]) / "outputs").exists())
     r6 = execute_tool(build_tools("exec"), "read_file", {"path": "notes.md"}, "exec")
     check("read_file ok", r6 == "x", r6)
     r7 = execute_tool(build_tools("exec"), "write_file", {"path": "../../evil.md", "content": "x"}, "exec")
@@ -108,6 +112,21 @@ def main() -> int:
     print("\n== sheets tools (unconfigured) ==")
     rs2 = execute_tool(FINANCE_TOOLS, "sheets_push", {}, "finance")
     check("sheets_push gives setup error", "error" in rs2, rs2)
+
+    print("\n== failed-generation rescue parser ==")
+    import json as _json
+
+    cases = [
+        ('{"error":{"failed_generation":"<function=ledger_summary={\\"period\\": \\"month\\"}</function>"}}', "ledger_summary"),
+        ('{"error":{"failed_generation":"<function=ledger_summary{\\"period\\": \\"month\\"}</function>"}}', "ledger_summary"),
+        ('{"error":{"failed_generation":"<function=ledger_add={ \\"amount\\": 5 }>"}}', "ledger_add"),
+    ]
+    for body, expected in cases:
+        res = _parse_failed_generation(body)
+        ok = res is not None and res.tool_calls and res.tool_calls[0].name == expected
+        check(f"rescue parser handles: {expected}", ok, str(res.tool_calls if res else None))
+    res = _parse_failed_generation('{"error":{"message":"boom"}}')
+    check("rescue parser returns None when no generation", res is None)
 
     print(f"\n{'-' * 40}\nresult: {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

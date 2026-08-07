@@ -137,5 +137,4 @@ python selftest.py     # 40 offline checks: registry, tools, scoring, schemas, t
 
 - Streaming responses over the web API (SSE) for long agent runs.
 - A simple chat UI (static HTML) served by FastAPI.
-- Resume parser (reuse the ResumeIQ backend's `pdfplumber` extraction) so `skill_match`
-  can score PDF resumes directly.
+- PDF resume parsing so `skill_match` can score PDF resumes directly.

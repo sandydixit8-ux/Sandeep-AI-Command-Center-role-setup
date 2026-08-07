@@ -114,6 +114,12 @@ class LLMClient:
         except httpx.HTTPError as exc:
             raise LLMError(f"openai request failed: {exc}") from exc
         if resp.status_code != 200:
+            # Some models (e.g. llama.cpp derivatives on Groq) occasionally emit a tool
+            # call in <function=...> text form instead of structured JSON. Groq rejects
+            # it with a 400 but includes the raw generation — rescue it and run the tool.
+            fallback = _parse_failed_generation(resp.text)
+            if fallback is not None:
+                return fallback
             raise LLMError(f"openai error {resp.status_code}: {resp.text[:400]}")
         data = resp.json()
         result = ChatResult(raw=data)
@@ -230,3 +236,36 @@ def _mock_complete(history: list[dict[str, Any]]) -> ChatResult:
         return ChatResult(tool_calls=[ToolCall(id="mock_tool_call", name=name, arguments=args)])
     text = f"[mock] received: {last_user[:200] or '(no user message)'}"
     return ChatResult(text=text)
+
+
+# ------------------------------------------------------------------ fallback
+
+
+def _parse_failed_generation(error_body: str) -> ChatResult | None:
+    """Rescue a tool call that a provider rejected as text.
+
+    Some providers return 400 for the llama.cpp-style format
+    ``<function=name={"arg": "val"}</function>`` but include the raw generation in the
+    error body. Parse it so the agent loop can execute the tool anyway. Both forms are
+    tolerated: with or without an ``=`` between the function name and the JSON.
+    """
+    try:
+        data = json.loads(error_body)
+        gen = (data.get("error") or {}).get("failed_generation") or ""
+        if not gen:
+            return None
+    except (json.JSONDecodeError, AttributeError):
+        gen = error_body
+    import re
+
+    m = re.search(r"<function=(\w+)(?:=\s*)?(\{.*?\}|[^\n<]+)(?:</function>|>|$)", gen, re.S)
+    if not m:
+        return None
+    args_str = m.group(2).strip()
+    try:
+        arguments = json.loads(args_str)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    return ChatResult(tool_calls=[ToolCall(id="rescued_tool_call", name=m.group(1), arguments=arguments)])
