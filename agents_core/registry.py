@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from .agent import Agent
 from .prompts import AGENTS
-from .tools import FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS
+from .tools import FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS, build_tools
 
 _EXTRA_TOOLS = {
+    "commander": FINANCE_TOOLS + JOBSEARCH_TOOLS + GMAIL_TOOLS,
     "finance": FINANCE_TOOLS,
     "jobsearch": JOBSEARCH_TOOLS,
     "exec": GMAIL_TOOLS,
@@ -14,11 +15,12 @@ _EXTRA_TOOLS = {
 
 
 def get_agent(name: str) -> Agent:
-    """Return a configured Agent. `name` is the agent key ('exec', 'finance', ...)."""
+    """Return a configured Agent. `name` is the agent key ('commander', 'finance', ...)."""
     if name not in AGENTS:
         raise KeyError(f"unknown agent {name!r}. Available: {', '.join(AGENTS)}")
     label, system_prompt = AGENTS[name]
-    agent = Agent(name=name, system_prompt=system_prompt, tools=_EXTRA_TOOLS.get(name))
+    tools = build_tools(name, _EXTRA_TOOLS.get(name))
+    agent = Agent(name=name, system_prompt=system_prompt, tools=tools)
     agent.label = label  # type: ignore[attr-defined]
     return agent
 

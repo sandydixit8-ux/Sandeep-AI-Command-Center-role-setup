@@ -26,7 +26,7 @@ from agents_core.registry import get_agent, list_agents
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sandeep AI Command Center — agents suite")
-    parser.add_argument("--agent", "-a", help="agent key (exec, finance, bd, jobsearch, marketing, docs, coach)")
+    parser.add_argument("--agent", "-a", default="commander", help="agent key (commander, exec, finance, bd, jobsearch, marketing, docs, coach)")
     parser.add_argument("--chat", action="store_true", help="interactive REPL")
     parser.add_argument("--mock", action="store_true", help="use the offline mock LLM (no API key needed)")
     parser.add_argument("--list", action="store_true", help="list available agents")
@@ -56,7 +56,7 @@ def main() -> int:
         return 1
 
     if not args.agent:
-        parser.error("--agent is required (or use --list)")
+        args.agent = "commander"
 
     try:
         agent = get_agent(args.agent)

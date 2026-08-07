@@ -38,8 +38,15 @@ def check(label: str, cond: bool, detail: str = "") -> None:
 def main() -> int:
     print("== registry ==")
     keys = list_agents()
-    for expected in ("exec", "finance", "bd", "jobsearch", "marketing", "docs", "coach"):
+    for expected in ("commander", "exec", "finance", "bd", "jobsearch", "marketing", "docs", "coach"):
         check(f"agent registered: {expected}", expected in keys)
+
+    print("\n== commander has all tools ==")
+    cmdr = get_agent("commander")
+    names = {t.name for t in cmdr.tools}
+    for tool in ("ledger_add", "ledger_summary", "skill_match", "gmail_inbox", "gmail_send", "web_search", "write_file"):
+        check(f"commander has tool: {tool}", tool in names)
+    cmdr.close()
 
     print("\n== tool schemas ==")
     t = build_tools("docs")[0]

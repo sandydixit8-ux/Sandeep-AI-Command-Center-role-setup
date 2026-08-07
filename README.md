@@ -4,6 +4,11 @@ A lightweight, dependency-light Python framework that runs a suite of AI agents 
 Sandeep's day-to-day work: executive support, finance tracking, BD & proposals, job
 search, digital marketing, document automation, and learning coaching.
 
+The default agent — **`commander`** — is the full "Sandeep AI Command Center" from the
+role setup prompt: one integrated advisor covering all domains in a single voice, with
+every tool available. The specialist agents (`exec`, `finance`, `bd`, ...) are the same
+core with a narrower prompt and toolset when you want a focused session.
+
 Each agent is the same core (`agents_core`) with a domain system prompt and a tailored
 set of tools. All agents share one framework, so adding a new agent is a ~5 line change.
 
@@ -18,8 +23,10 @@ copy .env.example .env        # then add your API key (Anthropic or OpenAI-compa
 Use your existing ResumeIQ Anthropic key for `AGENT_ANTHROPIC_API_KEY`.
 
 ```bash
+python sandbox.py "Draft an email to a client and record a 1200 expense"   # commander (default)
 python sandbox.py --agent finance "Record a 50 GBP software subscription expense"
 python sandbox.py --agent bd --chat          # interactive REPL
+python sandbox.py --agent commander --chat   # full command center in REPL
 python sandbox.py --agent docs --mock "..."  # offline test, no API key
 python sandbox.py --list
 ```
@@ -28,6 +35,7 @@ python sandbox.py --list
 
 | Key | Agent | What it does |
 |-----|-------|--------------|
+| `commander` | **Command Center** | the full integrated role prompt — all domains, one voice, all tools |
 | `exec` | Executive Assistant | email drafts, meeting notes (decisions + owners), task prioritisation |
 | `finance` | Finance Tracker | records income/expenses to a CSV ledger, cash-flow summaries, invoice follow-ups |
 | `bd` | BD & Proposals | RFP compliance checks, win-probability, personalised outreach, proposal drafts |
@@ -72,7 +80,8 @@ text — it never fabricates fit. `skills_in` extracts known skill keywords from
 uvicorn webapi.app:app --reload      # run from the Agents/ directory
 ```
 Endpoints: `GET /health`, `GET /api/v1/agents`, `POST /api/v1/run` (`{agent, task}`).
-Deploy on Render with the included `render.yaml` (Blueprint → select this repo).
+`commander` is available like any other agent here. Deploy on Render with the included
+`render.yaml` (Blueprint → select this repo).
 
 ### Scheduled runs (Windows Task Scheduler)
 `scripts/scheduled_run.py` runs a standalone finance summary (`--finance`) or inbox
@@ -121,7 +130,7 @@ API and OpenAI-compatible chat completions are supported.
 ## Testing
 
 ```bash
-python selftest.py     # 32 offline checks: registry, tools, scoring, schemas, tool loop
+python selftest.py     # 40 offline checks: registry, tools, scoring, schemas, tool loop
 ```
 
 ## Roadmap
