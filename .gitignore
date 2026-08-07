@@ -1,0 +1,11 @@
+# Secrets / local data
+.env
+data/
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
