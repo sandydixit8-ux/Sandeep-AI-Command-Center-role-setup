@@ -296,23 +296,6 @@ def tool_ledger_summary(period: str = "month") -> str:
     return "\n".join(lines)
 
 
-COMMON_TOOLS: list[Tool] = [
-    Tool("get_time", "Get the current date and time.", tool_get_time, {"type": "object", "properties": {}}),
-    Tool("list_files", "List files in a directory (relative to the project root).", tool_list_files, {"type": "object", "properties": {"dirpath": {"type": "string", "description": "directory path"}}}),
-    Tool("read_file", "Read a text file relative to the project root.", tool_read_file, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
-    Tool("write_file", "Write a text file under the outputs/ directory.", tool_write_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
-    Tool("append_file", "Append text to a file under the outputs/ directory.", tool_append_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
-    Tool("web_search", "Search the web for current information.", tool_web_search, {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}),
-    Tool("remember", "Save a note/fact for this agent to remember later.", tool_remember, {"type": "object", "properties": {"agent": {"type": "string"}, "note": {"type": "string"}}, "required": ["agent", "note"]}),
-    Tool("recall", "Show the saved notes for this agent.", tool_recall, {"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
-]
-
-FINANCE_TOOLS: list[Tool] = [
-    Tool("ledger_add", "Record an income or expense in the finance ledger.", tool_ledger_add, {"type": "object", "properties": {"amount": {"type": "number"}, "category": {"type": "string"}, "description": {"type": "string"}, "type": {"type": "string", "enum": ["income", "expense"]}, "date": {"type": "string"}}, "required": ["amount", "category", "description"]}),
-    Tool("ledger_summary", "Summarise income/expenses for a period.", tool_ledger_summary, {"type": "object", "properties": {"period": {"type": "string", "enum": ["all", "month", "year"]}}}),
-]
-
-
 def build_tools(agent: str, extra: list[Tool] | None = None) -> list[Tool]:
     return COMMON_TOOLS + (extra or [])
 
@@ -329,3 +312,107 @@ def execute_tool(tools: list[Tool], name: str, args: dict[str, Any], agent: str)
             except Exception as exc:  # noqa: BLE001
                 return f"error: {name} failed: {exc}"
     return f"error: unknown tool: {name}"
+
+
+# ------------------------------------------------------------------ skill match
+
+
+def _read_tool_input(value: str) -> str:
+    """If `value` points at an existing file, read it; otherwise treat it as text."""
+    if len(value) > 500:
+        return value
+    for root in (BASE_DIR.parent, OUTPUTS_DIR):
+        candidate = root / value
+        if candidate.is_file() and candidate.stat().st_size <= 200_000:
+            return candidate.read_text(encoding="utf-8", errors="replace")
+    return value
+
+
+def tool_skill_match(resume: str, jd: str) -> str:
+    """Score a resume against a job description. Each arg may be a file path or raw text."""
+    from .scoring import format_score, score_resume
+
+    return format_score(score_resume(_read_tool_input(resume), _read_tool_input(jd)))
+
+
+def tool_skills_in(text: str) -> str:
+    """List known skill keywords detected in a text (e.g. a capability statement)."""
+    from .scoring import skills_summary
+
+    return skills_summary(_read_tool_input(text))
+
+
+# ------------------------------------------------------------------ gmail
+
+
+def tool_gmail_inbox(query: str = "UNSEEN", limit: int = 10) -> str:
+    from . import gmail as g
+
+    return g.inbox_list(query, limit)
+
+
+def tool_gmail_thread(message_id: str) -> str:
+    from . import gmail as g
+
+    return g.read_thread(message_id)
+
+
+def tool_gmail_draft(message_id: str, reply_body: str) -> str:
+    from . import gmail as g
+
+    return g.draft_reply(message_id, reply_body)
+
+
+def tool_gmail_send(to: str, subject: str, body: str) -> str:
+    from . import gmail as g
+
+    return g.send_email(to, subject, body)
+
+
+# ------------------------------------------------------------------ sheets
+
+
+def tool_sheets_push() -> str:
+    from . import sheets as s
+
+    return s.push_to_sheets()
+
+
+def tool_sheets_pull() -> str:
+    from . import sheets as s
+
+    return s.pull_from_sheets()
+
+
+# ------------------------------------------------------------------ tool lists
+
+
+COMMON_TOOLS: list[Tool] = [
+    Tool("get_time", "Get the current date and time.", tool_get_time, {"type": "object", "properties": {}}),
+    Tool("list_files", "List files in a directory (relative to the project root).", tool_list_files, {"type": "object", "properties": {"dirpath": {"type": "string", "description": "directory path"}}}),
+    Tool("read_file", "Read a text file relative to the project root.", tool_read_file, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+    Tool("write_file", "Write a text file under the outputs/ directory.", tool_write_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+    Tool("append_file", "Append text to file under the outputs/ directory.", tool_append_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
+    Tool("web_search", "Search the web for current information.", tool_web_search, {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}),
+    Tool("remember", "Save a note/fact for this agent to remember later.", tool_remember, {"type": "object", "properties": {"agent": {"type": "string"}, "note": {"type": "string"}}, "required": ["agent", "note"]}),
+    Tool("recall", "Show the saved notes for this agent.", tool_recall, {"type": "object", "properties": {"agent": {"type": "string"}}, "required": ["agent"]}),
+]
+
+FINANCE_TOOLS: list[Tool] = [
+    Tool("ledger_add", "Record an income or expense in the finance ledger.", tool_ledger_add, {"type": "object", "properties": {"amount": {"type": "number"}, "category": {"type": "string"}, "description": {"type": "string"}, "type": {"type": "string", "enum": ["income", "expense"]}, "date": {"type": "string"}}, "required": ["amount", "category", "description"]}),
+    Tool("ledger_summary", "Summarise income/expenses for a period.", tool_ledger_summary, {"type": "object", "properties": {"period": {"type": "string", "enum": ["all", "month", "year"]}}}),
+    Tool("sheets_push", "Push the local finance ledger to Google Sheets.", tool_sheets_push, {"type": "object", "properties": {}}),
+    Tool("sheets_pull", "Pull the Google Sheet ledger back into the local CSV.", tool_sheets_pull, {"type": "object", "properties": {}}),
+]
+
+JOBSEARCH_TOOLS: list[Tool] = [
+    Tool("skill_match", "Score a resume against a job description. Each argument may be a file path or raw text.", tool_skill_match, {"type": "object", "properties": {"resume": {"type": "string"}, "jd": {"type": "string"}}, "required": ["resume", "jd"]}),
+    Tool("skills_in", "List known skill keywords detected in a text or file.", tool_skills_in, {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
+]
+
+GMAIL_TOOLS: list[Tool] = [
+    Tool("gmail_inbox", "List recent inbox messages (IMAP query, default UNSEEN).", tool_gmail_inbox, {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}),
+    Tool("gmail_thread", "Read a full email thread by its id (from gmail_inbox).", tool_gmail_thread, {"type": "object", "properties": {"message_id": {"type": "string"}}, "required": ["message_id"]}),
+    Tool("gmail_draft", "Save a reply draft to a file for review (does not send).", tool_gmail_draft, {"type": "object", "properties": {"message_id": {"type": "string"}, "reply_body": {"type": "string"}}, "required": ["message_id", "reply_body"]}),
+    Tool("gmail_send", "SEND an email via Gmail. Only call after the user has explicitly approved the content.", tool_gmail_send, {"type": "object", "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to", "subject", "body"]}),
+]

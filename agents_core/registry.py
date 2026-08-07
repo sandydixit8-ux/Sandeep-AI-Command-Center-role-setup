@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from .agent import Agent
 from .prompts import AGENTS
-from .tools import FINANCE_TOOLS
+from .tools import FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS
+
+_EXTRA_TOOLS = {
+    "finance": FINANCE_TOOLS,
+    "jobsearch": JOBSEARCH_TOOLS,
+    "exec": GMAIL_TOOLS,
+    "bd": GMAIL_TOOLS,
+}
 
 
 def get_agent(name: str) -> Agent:
@@ -11,8 +18,7 @@ def get_agent(name: str) -> Agent:
     if name not in AGENTS:
         raise KeyError(f"unknown agent {name!r}. Available: {', '.join(AGENTS)}")
     label, system_prompt = AGENTS[name]
-    tools = FINANCE_TOOLS if name == "finance" else None
-    agent = Agent(name=name, system_prompt=system_prompt, tools=tools)
+    agent = Agent(name=name, system_prompt=system_prompt, tools=_EXTRA_TOOLS.get(name))
     agent.label = label  # type: ignore[attr-defined]
     return agent
 

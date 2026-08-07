@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents_core.agent import Agent
 from agents_core.registry import get_agent, list_agents
-from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS
+from agents_core.scoring import score_resume, extract_skills
+from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS
 
 PASS = 0
 FAIL = 0
@@ -75,6 +76,31 @@ def main() -> int:
     check("read_file ok", r6 == "x", r6)
     r7 = execute_tool(build_tools("exec"), "write_file", {"path": "../../evil.md", "content": "x"}, "exec")
     check("path traversal blocked", "error" in r7, r7)
+
+    print("\n== skill-match scoring ==")
+    resume = "Experienced Python developer. 5 years writing REST APIs with FastAPI, Docker, AWS, git. Project management with agile and jira."
+    jd = "Looking for a Python + FastAPI engineer. Must know Docker, AWS, git, CI/CD, Kubernetes. Project management with scrum is a plus."
+    result = score_resume(resume, jd)
+    check("score computed", isinstance(result["score"], int) and 0 <= result["score"] <= 100, str(result["score"]))
+    check("python matched", "python" in result["matched"], str(result["matched"]))
+    check("fastapi matched", "fastapi" in result["matched"], str(result["matched"]))
+    check("kubernetes flagged as gap", "kubernetes" in result["gaps"], str(result["gaps"]))
+    check("ci/cd flagged as gap", "ci/cd" in result["gaps"], str(result["gaps"]))
+    check("no fabricated skills", "basket weaving" not in result["matched"])
+    r = execute_tool(JOBSEARCH_TOOLS, "skill_match", {"resume": resume, "jd": jd}, "jobsearch")
+    check("skill_match tool renders score", "skill match:" in r and "gaps" in r, r[:80])
+    rs = execute_tool(JOBSEARCH_TOOLS, "skills_in", {"text": "Python, FastAPI, docker, kubernetes"}, "jobsearch")
+    check("skills_in detects known skills", "python" in rs and "docker" in rs and "kubernetes" in rs, rs)
+
+    print("\n== gmail tools (unconfigured) ==")
+    rg = execute_tool(GMAIL_TOOLS, "gmail_inbox", {}, "exec")
+    check("gmail_inbox gives setup error", "error" in rg and "Gmail is not configured" in rg, rg)
+    rg2 = execute_tool(GMAIL_TOOLS, "gmail_send", {"to": "a@b.com", "subject": "hi", "body": "hello"}, "exec")
+    check("gmail_send blocked when unconfigured", "error" in rg2, rg2)
+
+    print("\n== sheets tools (unconfigured) ==")
+    rs2 = execute_tool(FINANCE_TOOLS, "sheets_push", {}, "finance")
+    check("sheets_push gives setup error", "error" in rs2, rs2)
 
     print(f"\n{'-' * 40}\nresult: {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

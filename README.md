@@ -45,6 +45,39 @@ python sandbox.py --list
 | `AGENT_ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Anthropic model |
 | `AGENT_OPENAI_API_KEY` / `AGENT_OPENAI_BASE_URL` / `AGENT_OPENAI_MODEL` | — | OpenAI-compatible (OpenAI, Groq, Ollama, LM Studio) |
 | `AGENT_SEARCH_BRAVE_API_KEY` | — | Optional. If unset, `web_search` uses DuckDuckGo HTML (may be rate-limited) |
+| `AGENT_GMAIL_USER` / `AGENT_GMAIL_APP_PASSWORD` | — | Gmail inbox triage + reply drafts (app password from Google) |
+| `AGENT_GOOGLE_SERVICE_ACCOUNT_FILE` / `AGENT_SHEET_ID` / `AGENT_SHEET_RANGE` | — | Google Sheets ledger sync (optional, needs `pip install google-api-python-client google-auth`) |
+
+## Integrations
+
+### Gmail (exec + bd agents)
+Set `AGENT_GMAIL_USER` and an [app password](https://myaccount.google.com/apppasswords).
+Tools: `gmail_inbox` (IMAP query, default `UNSEEN`), `gmail_thread`, `gmail_draft`
+(saves a reply for review — never sends), and `gmail_send` (only called after you
+explicitly approve the content). Sending uses Gmail SMTP.
+
+### Google Sheets ledger (finance agent)
+1. Create a service account in Google Cloud Console and share your sheet with its email.
+2. Set `AGENT_GOOGLE_SERVICE_ACCOUNT_FILE`, `AGENT_SHEET_ID`, then
+   `pip install google-api-python-client google-auth`.
+Tools: `sheets_push` (CSV → sheet) and `sheets_pull` (sheet → CSV).
+
+### Job-search scoring (jobsearch agent)
+The `skill_match` tool scores a resume against a JD by strict keyword overlap (0–100%),
+listing matched skills and the real gaps. It only counts skills literally present in the
+text — it never fabricates fit. `skills_in` extracts known skill keywords from any text.
+
+### Web API
+```bash
+uvicorn webapi.app:app --reload      # run from the Agents/ directory
+```
+Endpoints: `GET /health`, `GET /api/v1/agents`, `POST /api/v1/run` (`{agent, task}`).
+Deploy on Render with the included `render.yaml` (Blueprint → select this repo).
+
+### Scheduled runs (Windows Task Scheduler)
+`scripts/scheduled_run.py` runs a standalone finance summary (`--finance`) or inbox
+triage (`--inbox --limit 10`) and logs to `data/scheduled/scheduled.log`. Add it as a
+Task Scheduler daily/weekly trigger — the script header has a ready-made task config.
 
 ## Architecture
 
@@ -52,11 +85,17 @@ python sandbox.py --list
 Agents/
   sandbox.py            CLI entry point
   selftest.py           offline tests (no API key)
+  render.yaml           Render blueprint for the web API
+  webapi/
+    app.py              FastAPI app (health, agents list, run)
   agents_core/
     config.py           env config
     llm.py              Anthropic + OpenAI-compatible clients + tool-loop primitives
     tools.py            tool registry + built-in tools (file, search, memory, ledger)
     agent.py            BaseAgent: history, tool-calling loop, error handling
+    scoring.py          honest resume-vs-JD skill-match scoring
+    gmail.py            Gmail IMAP/SMTP (stdlib only)
+    sheets.py           Google Sheets ledger sync (optional dependency)
     prompts.py          system prompts for all 7 agents
     registry.py         agent factory + registry
   data/                 (gitignored) agent memory + finance_ledger.csv
@@ -76,16 +115,18 @@ API and OpenAI-compatible chat completions are supported.
   and it is not a tax/compliance adviser.
 - Agents never fabricate client names, project history, or metrics — they use only what
   you provide.
+- Email is never sent without explicit user approval; drafts are saved to
+  `outputs/gmail/` for review first.
 
 ## Testing
 
 ```bash
-python selftest.py     # 21 offline checks: registry, tools, schemas, tool loop
+python selftest.py     # 32 offline checks: registry, tools, scoring, schemas, tool loop
 ```
 
 ## Roadmap
 
-- Gmail/IMAP integration for the executive assistant (inbox triage + send drafts).
-- Google Sheets-backed ledger instead of CSV.
-- Scheduled runs (Windows Task Scheduler) for weekly finance summaries.
-- A web UI (FastAPI) on top of `agents_core`, deployable on Render like ResumeIQ.
+- Streaming responses over the web API (SSE) for long agent runs.
+- A simple chat UI (static HTML) served by FastAPI.
+- Resume parser (reuse the ResumeIQ backend's `pdfplumber` extraction) so `skill_match`
+  can score PDF resumes directly.

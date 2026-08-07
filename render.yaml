@@ -1,0 +1,31 @@
+# Sandeep AI Command Center — web API (deployable on Render)
+# How to use:
+#   1. Push this repo to GitHub.
+#   2. In Render: New + "Blueprint" -> select the repo.
+#   3. Fill the secrets marked "fill after creation".
+#   4. Apply -> Render builds and runs the API.
+services:
+  - type: web
+    name: ai-command-center-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn webapi.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: AGENT_LLM_PROVIDER
+        value: anthropic
+      - key: AGENT_ANTHROPIC_API_KEY
+        sync: false
+      - key: AGENT_OPENAI_API_KEY
+        sync: false
+      - key: AGENT_GMAIL_USER
+        sync: false
+      - key: AGENT_GMAIL_APP_PASSWORD
+        sync: false
+      - key: AGENT_SEARCH_BRAVE_API_KEY
+        sync: false
+      - key: AGENT_GOOGLE_SERVICE_ACCOUNT_FILE
+        sync: false
+      - key: AGENT_SHEET_ID
+        sync: false

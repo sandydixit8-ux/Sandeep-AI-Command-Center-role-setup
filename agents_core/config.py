@@ -34,6 +34,11 @@ class Settings:
         self.openai_base_url = _env("AGENT_OPENAI_BASE_URL") or "https://api.openai.com/v1"
         self.openai_model = _env("AGENT_OPENAI_MODEL") or "gpt-4o-mini"
         self.search_brave_api_key = _env("AGENT_SEARCH_BRAVE_API_KEY")
+        self.gmail_user = _env("AGENT_GMAIL_USER")
+        self.gmail_app_password = _env("AGENT_GMAIL_APP_PASSWORD")
+        self.google_service_account_file = _env("AGENT_GOOGLE_SERVICE_ACCOUNT_FILE")
+        self.sheet_id = _env("AGENT_SHEET_ID")
+        self.sheet_range = _env("AGENT_SHEET_RANGE", "A1:E1000")
         self.timeout = float(_env("AGENT_TIMEOUT", "90") or 90)
         self.max_tool_steps = int(_env("AGENT_MAX_TOOL_STEPS", "10") or 10)
 
