@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from agents_core.registry import get_agent
 from agents_core.prompts import AGENTS
 from agents_core import market
+from agents_core import options as options_mod
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -231,6 +232,111 @@ def paper_sell(symbol: str, quantity: int) -> dict:
         return market.paper_sell(symbol, quantity)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- option chain intelligence
+
+
+def _valid_underlying(underlying: str) -> str:
+    u = underlying.upper()
+    if u not in options_mod.NSE_UNDERLYINGS:
+        raise HTTPException(status_code=400,
+                            detail=f"unsupported underlying {underlying!r}; choose from {sorted(options_mod.NSE_UNDERLYINGS)}")
+    return u
+
+
+def _analyze(underlying: str, expiry: str | None) -> dict:
+    try:
+        return options_mod.analyze_chain(_valid_underlying(underlying), expiry)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"option-chain fetch failed: {exc}") from exc
+
+
+@app.get("/api/v1/options/analysis")
+def options_analysis(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    return _analyze(underlying, expiry)
+
+
+@app.get("/api/v1/options/expiries")
+def options_expiries(underlying: str = "NIFTY") -> list[str]:
+    snap = options_mod.OptionChainDataService().fetch(_valid_underlying(underlying), store=False)
+    return snap.expiries
+
+
+@app.get("/api/v1/options/metrics")
+def options_metrics(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    return _analyze(underlying, expiry)["analytics"]
+
+
+@app.get("/api/v1/options/support-resistance")
+def options_support_resistance(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    return _analyze(underlying, expiry)["support_resistance"]
+
+
+@app.get("/api/v1/options/scenarios")
+def options_scenarios(underlying: str = "NIFTY", expiry: str | None = None) -> list[dict]:
+    return _analyze(underlying, expiry)["scenarios"]
+
+
+@app.get("/api/v1/options/signal")
+def options_signal(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    return _analyze(underlying, expiry)["signal"]
+
+
+@app.get("/api/v1/options/strategies")
+def options_strategies(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    a = _analyze(underlying, expiry)
+    return {"strategies": a["strategies"], "suggestions": a["suggestions"]}
+
+
+@app.get("/api/v1/options/chain")
+def options_chain(underlying: str = "NIFTY", expiry: str | None = None,
+                  limit: int = 0) -> dict:
+    a = _analyze(underlying, expiry)
+    contracts = a["contracts"]
+    if limit and limit > 0:
+        contracts = contracts[: int(limit)]
+    return {
+        "meta": a["meta"], "analytics": a["analytics"],
+        "support_resistance": a["support_resistance"],
+        "signal": a["signal"], "contracts": contracts,
+    }
+
+
+@app.get("/api/v1/options/unusual-activity")
+def options_unusual_activity(underlying: str = "NIFTY", expiry: str | None = None) -> list[dict]:
+    return _analyze(underlying, expiry)["analytics"]["unusual_activity"]
+
+
+@app.get("/api/v1/options/paper/positions")
+def options_paper_positions() -> list[dict]:
+    return options_mod.OptionsPaperEngine().positions()
+
+
+@app.post("/api/v1/options/paper/open")
+def options_paper_open(underlying: str = "NIFTY", expiry: str | None = None,
+                       strike: float = 0, option_type: str = "CE",
+                       action: str = "BUY", quantity: int = 1,
+                       entry_price: float = 0.0) -> dict:
+    if not expiry or strike <= 0 or entry_price <= 0 or quantity <= 0:
+        raise HTTPException(status_code=400, detail="expiry, strike, quantity and entry_price required")
+    if option_type.upper() not in ("CE", "PE") or action.upper() not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="option_type CE/PE, action BUY/SELL")
+    pos = options_mod.OptionsPaperEngine().open(
+        _valid_underlying(underlying), expiry, strike, option_type.upper(),
+        action.upper(), quantity, entry_price)
+    return {"opened": pos.__dict__, "note": "Paper trade only — no real money."}
+
+
+@app.get("/api/v1/options/backtest")
+def options_backtest(strategy: str = "iron_condor", notional: float = 100000.0,
+                     hold_days: int = 30, premium_pct: float = 0.04) -> dict:
+    return options_mod.OptionsBacktest().run(strategy, notional, hold_days, premium_pct)
+
+
+@app.get("/api/v1/options/backtest/history")
+def options_backtest_history() -> list[dict]:
+    return options_mod.OptionsBacktest().history()
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

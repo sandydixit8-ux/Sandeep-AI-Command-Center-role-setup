@@ -561,6 +561,80 @@ def tool_paper_sell(symbol: str, quantity: int) -> str:
     return _market_module().paper_sell(symbol, quantity)
 
 
+# ------------------------------------------------------------------ option chain intelligence
+
+
+def _options_module():
+    from . import options as o
+
+    return o
+
+
+def _jsonish(data, max_chars: int = 6000) -> str:
+    import json as _json
+
+    try:
+        text = _json.dumps(data, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(data)
+    return text[:max_chars]
+
+
+def tool_option_chain(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    return _jsonish(_options_module().analyze_chain(underlying, expiry))
+
+
+def tool_option_metrics(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["analytics"])
+
+
+def tool_option_support_resistance(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["support_resistance"])
+
+
+def tool_option_unusual(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["analytics"]["unusual_activity"])
+
+
+def tool_option_scenarios(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["scenarios"])
+
+
+def tool_option_signal(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["signal"])
+
+
+def tool_option_brief(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    return _options_module().format_brief(_options_module().analyze_chain(underlying, expiry))
+
+
+def tool_option_strategy(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(a["strategies"] + a["suggestions"])
+
+
+def tool_option_paper_open(underlying: str, expiry: str, strike: float, option_type: str,
+                           action: str, quantity: int, entry_price: float) -> str:
+    p = _options_module().OptionsPaperEngine()
+    pos = p.open(underlying, expiry, strike, option_type, action, quantity, entry_price)
+    return _jsonish({"opened": pos.__dict__, "note": "Paper trade only — no real money."})
+
+
+def tool_option_paper_positions() -> str:
+    return _jsonish(_options_module().OptionsPaperEngine().positions())
+
+
+def tool_option_backtest(strategy: str = "iron_condor", notional: float = 100000.0,
+                         hold_days: int = 30, premium_pct: float = 0.04) -> str:
+    return _jsonish(_options_module().OptionsBacktest().run(
+        strategy, notional, hold_days, premium_pct))
+
+
 MARKET_TOOLS: list[Tool] = [
     Tool("market_indices", "List tracked market indices (NIFTY 50, SENSEX, etc.) with change and status.", tool_market_indices, {"type": "object", "properties": {}}),
     Tool("market_quote", "Get a stock quote (price, change, market cap, valuation) by symbol.", tool_market_quote, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
@@ -579,6 +653,20 @@ MARKET_TOOLS: list[Tool] = [
     Tool("paper_portfolio", "Show the simulated paper-trading portfolio (positions, cash, P&L).", tool_paper_portfolio, {"type": "object", "properties": {}}),
     Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
     Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+]
+
+OPTION_TOOLS: list[Tool] = [
+    Tool("option_chain", "Full NIFTY/BANKNIFTY/FINNIFTY/SENSEX option-chain analysis: OI, PCR, IV, max pain, support/resistance, scenarios, signal, strategies.", tool_option_chain, {"type": "object", "properties": {"underlying": {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]}, "expiry": {"type": "string"}}}),
+    Tool("option_metrics", "Option-chain calculated metrics: OI, OI change, PCR (OI and volume), IV smile/regime/skew, max pain, expected move, liquidity, unusual activity.", tool_option_metrics, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_support_resistance", "Support/resistance levels derived from option OI clusters with confidence.", tool_option_support_resistance, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_unusual_activity", "Unusual option activity: volume-to-OI spikes (evidence, not a trade recommendation).", tool_option_unusual, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_scenarios", "Bull / bear / range scenarios with invalidation levels (scenario, not prediction).", tool_option_scenarios, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_signal", "Composite option-chain signal score (0-100) with documented weights and confidence gating on data quality.", tool_option_signal, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_brief", "Concise natural-language option-chain brief with the data-quality badge.", tool_option_brief, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_strategy", "Evaluate option strategies (long call/put, spreads, strangle, iron condor, covered call) with payoff, breakevens, max profit/loss and est. margin.", tool_option_strategy, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_paper_open", "Open a PAPER option position (no real money) at a given entry price.", tool_option_paper_open, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}, "strike": {"type": "number"}, "option_type": {"type": "string", "enum": ["CE", "PE"]}, "action": {"type": "string", "enum": ["BUY", "SELL"]}, "quantity": {"type": "integer"}, "entry_price": {"type": "number"}}, "required": ["underlying", "expiry", "strike", "option_type", "action", "quantity", "entry_price"]}),
+    Tool("option_paper_positions", "List open/closed paper option positions with P&L.", tool_option_paper_positions, {"type": "object", "properties": {}}),
+    Tool("option_backtest", "Run a simulated options strategy backtest with costs and slippage (approximate, not real results).", tool_option_backtest, {"type": "object", "properties": {"strategy": {"type": "string"}, "notional": {"type": "number"}, "hold_days": {"type": "integer"}, "premium_pct": {"type": "number"}}}),
 ]
 
 RISK_TOOLS: list[Tool] = [

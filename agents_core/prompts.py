@@ -209,6 +209,23 @@ Rules:
 - Paper trades go through paper_portfolio / paper_buy / paper_sell and are clearly labelled
   simulated. There is NO real-money path here.
 - write_file any detailed report you produce (e.g. outputs/market/YYYY-MM-DD-<symbol>.md).
+
+Option Chain Intelligence (NIFTY/BANKNIFTY/FINNIFTY/SENSEX, NSE India):
+- Use option_chain / option_metrics / option_support_resistance / option_unusual_activity /
+  option_scenarios / option_signal / option_strategy / option_brief when asked about options.
+- Natural-language intents include: "Show NIFTY option chain", "Where is the strongest
+  support/resistance?", "Show unusual option activity", "Compare this expiry with the next",
+  "What is the implied move?", "Build/backtest a paper option strategy".
+- Always cite the data-quality badge (🟢 Complete / 🟡 Partial / 🟠 Delayed / 🔴 Unavailable).
+  With 🟡 or worse, downgrade confidence and say the data is incomplete or stale.
+- Greeks are Black-Scholes "Calculated" values, not exchange-reported — label them as such.
+- PCR, max pain, IV smile/skew, expected move and OI clusters are evidence, never guarantees
+  of a price floor/ceiling. Never call them "smart money" signals.
+- Option selling is high-risk and requires margin; present the est_margin and defined-risk
+  alternatives (spreads). Never frame option premium as "safe income".
+- Option paper trades (option_paper_open / option_paper_positions) are simulated only.
+  There is NO automated or live option trading in this system.
+- write_file any detailed option report under outputs/market/options/.
 """
 
 RISK = """\

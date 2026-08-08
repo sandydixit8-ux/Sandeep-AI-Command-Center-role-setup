@@ -34,8 +34,10 @@ from agents_core.tools import (
     COMMON_TOOLS,
     MARKET_TOOLS,
     RISK_TOOLS,
+    OPTION_TOOLS,
 )
 from agents_core import market as mkt
+from agents_core import options as opt
 
 PASS = 0
 FAIL = 0
@@ -69,7 +71,13 @@ def main() -> int:
     mkt_names = {t.name for t in mkt_agent.tools}
     for tool in ("market_indices", "market_quote", "market_technical", "market_fundamental", "market_score", "market_signal", "market_screener", "market_brief", "market_news", "paper_buy", "paper_sell"):
         check(f"market agent has tool: {tool}", tool in mkt_names, str(sorted(mkt_names)))
+    for tool in ("option_chain", "option_metrics", "option_support_resistance", "option_unusual_activity", "option_scenarios", "option_signal", "option_brief", "option_strategy", "option_paper_open", "option_paper_positions", "option_backtest"):
+        check(f"market agent has option tool: {tool}", tool in mkt_names, str(sorted(mkt_names)))
     mkt_agent.close()
+    cmdr_tools = get_agent("commander")
+    cmdr_names = {t.name for t in cmdr_tools.tools}
+    check("commander has option tool: option_chain", "option_chain" in cmdr_names, str(sorted(cmdr_names)))
+    cmdr_tools.close()
     risk_agent = get_agent("risk")
     risk_names = {t.name for t in risk_agent.tools}
     for tool in ("position_size", "portfolio_risk", "market_regime", "paper_portfolio"):
@@ -390,6 +398,62 @@ def main() -> int:
     check("commander tools deduped", len(names) == len(set(names)), str(names))
     check("pdf_to_text appears once", names.count("pdf_to_text") == 1, str(names))
     cmdr_tools.close()
+
+    print("\n== option chain engine: greeks ==")
+    price = opt.bs_price(24570.0, 24500.0, 7 / 365.0, 0.065, 0.15, is_call=True)
+    check("bs_price returns positive call price", price > 0, str(price))
+    g = opt.bs_greeks(24570.0, 24500.0, 7 / 365.0, 0.065, 0.15, is_call=True)
+    check("delta in (0,1) for ITM call", 0 < g["delta"] < 1, str(g))
+    check("gamma positive", g["gamma"] > 0)
+    iv = opt.implied_vol(price, 24570.0, 24500.0, 7 / 365.0, 0.065, True)
+    check("implied_vol recovers input vol", 0.145 < iv < 0.155, str(iv))
+    check("dte parses NSE expiry", opt.days_to_expiry("11-Aug-2026") >= 0)
+
+    print("\n== option chain engine: mock provider + quality ==")
+    svc = opt.OptionChainDataService(provider=opt.MockOptionChainProvider())
+    snap = svc.fetch("NIFTY", store=False)
+    check("mock snapshot has contracts", len(snap.contracts) >= 40, str(len(snap.contracts)))
+    check("mock snapshot has CE and PE", any(c.option_type == "CE" for c in snap.contracts) and any(c.option_type == "PE" for c in snap.contracts))
+    check("quality report complete checks", len(snap.quality["checks"]) >= 8)
+    ana = opt.ChainAnalytics(snap).all()
+    check("pcr_oi is a float", isinstance(ana["pcr"]["pcr_oi"], (int, float)))
+    check("max pain within strike range", snap.strikes()[0] <= ana["max_pain"]["max_pain"] <= snap.strikes()[-1])
+    em = ana["expected_move"]
+    check("expected move brackets spot", em["lower"] < snap.spot < em["upper"])
+    check("expected move is not a prediction", "not a price prediction" in em["label"])
+    check("liquidity grade valid", ana["liquidity"]["grade"] in ("HIGH", "MEDIUM", "LOW"))
+    srz = opt.SupportResistance(snap).zones()
+    check("support below spot", all(x["strike"] < snap.spot for x in srz["support"]))
+    check("resistance above spot", all(x["strike"] > snap.spot for x in srz["resistance"]))
+    scens = opt.ScenarioEngine(snap, ana, srz).scenarios()
+    check("three scenarios", len(scens) == 3 and {s["name"] for s in scens} == {"Bullish", "Bearish", "Range-bound"})
+    sig = opt.SignalEngine(snap, ana).score()
+    check("signal score 0..100", 0 <= sig["score"] <= 100)
+    check("signal documents weights", sum(sig["weights"].values()) == 1.0, str(sig["weights"]))
+    check("signal has disclaimer", "Not a buy/sell call" in sig["disclaimer"])
+
+    print("\n== option chain engine: strategies + paper + backtest ==")
+    lab = opt.StrategyLab(snap, analytics=ana)
+    strat = lab.evaluate("iron_condor")
+    check("strategy has payoff series", len(strat["payoff"]["x"]) == len(strat["payoff"]["y"]) > 100)
+    check("strategy breakevens present", isinstance(strat["breakevens"], list))
+    paper = opt.OptionsPaperEngine()
+    pos = paper.open("NIFTY", snap.expiry, snap.spot, "CE", "BUY", 1, 100.0)
+    check("paper opens position", pos.status == "OPEN" and len(paper.positions()) == 1)
+    paper.close(pos.id, 120.0)
+    check("paper closes with pnl", paper.positions()[0]["status"] == "CLOSED" and paper.positions()[0]["pnl"] == 20.0, str(paper.positions()[0]["pnl"]))
+    bt = opt.OptionsBacktest().run("iron_condor", 100_000, 10)
+    check("backtest has costs + disclaimer", "costs" in bt and bt["costs"] > 0 and "Simulated" in bt["disclaimer"])
+
+    print("\n== option chain engine: option tools via execute_tool ==")
+    rb = execute_tool(OPTION_TOOLS, "option_brief", {"underlying": "NIFTY"}, "market")
+    check("option_brief tool works", "Option Chain Brief" in rb, rb[:80])
+    rm = execute_tool(OPTION_TOOLS, "option_metrics", {"underlying": "NIFTY"}, "market")
+    check("option_metrics tool works", '"pcr_oi"' in rm, rm[:80])
+    rsig = execute_tool(OPTION_TOOLS, "option_signal", {"underlying": "NIFTY"}, "market")
+    check("option_signal tool works", '"score"' in rsig, rsig[:80])
+    rerr = execute_tool(OPTION_TOOLS, "option_chain", {"underlying": "BOGUS"}, "market")
+    check("option_chain errors on bad underlying", "error" in rerr, rerr[:80])
 
     print(f"\n{'-' * 40}\nresult: {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

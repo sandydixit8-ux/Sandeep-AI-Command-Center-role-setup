@@ -1365,6 +1365,7 @@
     ["screener", "🎛️", "Screener"],
     ["watchlist", "⭐", "Watchlist"],
     ["signals", "🔔", "Signals"],
+    ["options", "🧾", "Option Chain"],
     ["portfolio", "💼", "Portfolio"],
     ["paper", "🧪", "Paper Trading"],
     ["backtest", "📈", "Backtest"],
@@ -1381,6 +1382,7 @@
     screener: "Filter the universe by score, sector, valuation and momentum.",
     watchlist: "Your saved symbols, refreshed with live Moneycontrol quotes (demo fallback offline).",
     signals: "Composite signals across the whole universe, never a single indicator.",
+    options: "NSE India option chains: OI, PCR, IV, max pain, expected move, unusual activity, scenarios, strategies and paper trading.",
     portfolio: "Simulated paper portfolio value, exposure and P&L.",
     paper: "Execute simulated buys and sells — no real money, ever.",
     backtest: "EMA+RSI strategy backtest on real historical OHLC with anti-overfit grading.",
@@ -1419,7 +1421,7 @@
       setTimeout(() => { addUserMessage("Give me today's market brief, the current regime and a composite signal for TCS."); runAgentTask("Give me today's market brief, the current regime and a composite signal for TCS."); }, 60);
     });
     const body = $("#mktBody");
-    const subs = { overview: mOverview, brief: mBrief, stocks: mStocks, stock: mStock, screener: mScreener, watchlist: mWatchlist, signals: mSignals, portfolio: mPortfolio, paper: mPaper, backtest: mBacktest, risk: mRisk, alerts: mAlerts, journal: mJournal, monitoring: mMonitoring, audit: mAudit };
+    const subs = { overview: mOverview, brief: mBrief, stocks: mStocks, stock: mStock, screener: mScreener, watchlist: mWatchlist, signals: mSignals, options: mOptions, portfolio: mPortfolio, paper: mPaper, backtest: mBacktest, risk: mRisk, alerts: mAlerts, journal: mJournal, monitoring: mMonitoring, audit: mAudit };
     (subs[sub] || mOverview)(body, route);
   }
 
@@ -1681,6 +1683,390 @@
         $$("#mktBody tr[data-sym]").forEach(tr => tr.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(tr.dataset.sym))));
       });
     }).catch(e => { body.innerHTML = mktError(e); });
+  }
+
+  /* ---------------- Option Chain Intelligence ---------------- */
+  const OPT_UNDERLYINGS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"];
+  const OPT_TABS = [
+    ["overview", "📊", "Overview"],
+    ["chain", "📋", "Chain"],
+    ["oi", "🏔️", "OI & PCR"],
+    ["iv", "🌊", "IV & Greeks"],
+    ["move", "🎯", "Max Pain / Move"],
+    ["unusual", "⚡", "Unusual Activity"],
+    ["strategy", "🧪", "Strategy Lab"],
+    ["paper", "📝", "Option Paper"],
+    ["backtest", "⏱️", "Option Backtest"],
+  ];
+
+  function optQualityBadge(q) {
+    if (!q) return '<span class="badge wait">Quality —</span>';
+    const status = q.status || "";
+    const cls = status.includes("🟢") ? "ok" : status.includes("🔴") ? "err" : "wait";
+    return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
+  }
+
+  function optHeader(meta, analytics) {
+    const iv = (analytics && analytics.iv) || {};
+    return `
+      <div class="mkt-banner">
+        <div class="row" style="flex-wrap:wrap;gap:12px;align-items:center">
+          <span class="avatar ai lg" style="font-size:20px">🧾</span>
+          <div class="grow"><b style="font-size:18px">${esc(meta.underlying)}</b> <span class="muted">${esc(meta.expiry)} · ${esc(meta.market_state)} · ${esc(meta.source)}</span>
+          <div><span style="font-size:20px;font-weight:700">${fmtNum(meta.spot, 2)}</span> <span class="muted small">spot</span></div></div>
+          ${optQualityBadge(meta.quality)}
+        </div>
+        <div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap">
+          ${analytics ? '<span class="badge">PCR(OI) ' + (analytics.pcr.pcr_oi ?? "—") + '</span><span class="badge">PCR(Vol) ' + (analytics.pcr.pcr_volume ?? "—") + '</span><span class="badge">ATM IV ' + (iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—") + '</span><span class="badge ' + (iv.regime === "HIGH" ? "err" : iv.regime === "LOW" ? "ok" : "wait") + '">IV ' + esc(iv.regime) + '</span><span class="badge">Max pain ' + fmtNum(analytics.max_pain.max_pain, 0) + '</span>' : ""}
+          <span class="muted small grow text-right">${esc(meta.timestamp)}</span>
+        </div>
+      </div>`;
+  }
+
+  function mOptions(body) {
+    body.innerHTML = `
+      <div class="row" style="flex-wrap:wrap;gap:12px;align-items:flex-end">
+        <div class="field" style="margin:0"><label>Underlying</label>
+          <select id="optUnder">${OPT_UNDERLYINGS.map(u => '<option' + (u === "NIFTY" ? " selected" : "") + '>' + u + '</option>').join("")}</select></div>
+        <div class="field grow" style="margin:0"><label>Expiry</label><select id="optExpiry"><option value="">Loading…</option></select></div>
+        <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="optLoad">Load chain</button></div>
+      </div>
+      <div class="seg" id="optTabs" style="margin-top:14px;overflow-x:auto">
+        ${OPT_TABS.map(t => '<button data-t="' + t[0] + '"><span>' + t[1] + '</span>' + t[2] + '</button>').join("")}
+      </div>
+      <div id="optBody" style="margin-top:16px"></div>`;
+    const expirySel = $("#optExpiry");
+    const optState = { underlying: "NIFTY", expiry: "", analysis: null };
+
+    const loadExpiries = () => {
+      window.OptionsClient.expiries(optState.underlying).then(list => {
+        expirySel.innerHTML = list.map(e => '<option value="' + esc(e) + '"' + (e === optState.expiry ? " selected" : "") + '>' + esc(e) + '</option>').join("") || '<option value="">No expiries</option>';
+        if (!optState.expiry && list.length) { optState.expiry = list[0]; }
+      }).catch(e => { expirySel.innerHTML = '<option value="">' + esc(e.message) + '</option>'; });
+    };
+
+    const renderTab = () => {
+      const t = document.querySelector("#optTabs button.sel");
+      const active = (t && t.dataset.t) || "overview";
+      const a = optState.analysis;
+      if (!a) { $("#optBody").innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">🧾</div><h3>No data yet</h3><p>Select an expiry and press "Load chain".</p></div>'; return; }
+      const subs = { overview: optOverview, chain: optChain, oi: optOI, iv: optIV, move: optMove, unusual: optUnusual, strategy: optStrategy, paper: optPaper, backtest: optBacktest };
+      (subs[active] || optOverview)($("#optBody"), a);
+    };
+
+    const load = () => {
+      const b = $("#optBody");
+      b.innerHTML = mktLoading();
+      window.OptionsClient.analysis(optState.underlying, optState.expiry).then(a => {
+        optState.analysis = a;
+        renderTab();
+        mktAudit("OPTIONS " + optState.underlying + " " + (optState.expiry || "") + " loaded");
+      }).catch(e => { b.innerHTML = mktError(e); });
+    };
+
+    $("#optUnder").addEventListener("change", e => { optState.underlying = e.target.value; optState.expiry = ""; expirySel.innerHTML = '<option value="">Loading…</option>'; loadExpiries(); });
+    $("#optExpiry").addEventListener("change", e => { optState.expiry = e.target.value; });
+    $("#optLoad").addEventListener("click", load);
+    $$("#optTabs button").forEach(btn => btn.addEventListener("click", () => {
+      $$("#optTabs button").forEach(x => x.classList.remove("sel"));
+      btn.classList.add("sel");
+      renderTab();
+    }));
+    loadExpiries();
+    load();
+  }
+
+  function optOverview(body, a) {
+    const m = a.meta, an = a.analytics, srz = a.support_resistance, sig = a.signal;
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="dash-grid" style="margin-top:14px">
+        ${mktStat("Signal score", sig.score + "/100", sig.label + " · conf " + sig.confidence)}
+        ${mktStat("PCR (OI)", an.pcr.pcr_oi ?? "—", "volume " + (an.pcr.pcr_volume ?? "—"))}
+        ${mktStat("Max pain", fmtNum(an.max_pain.max_pain, 0), (an.max_pain.distance_pct >= 0 ? "+" : "") + an.max_pain.distance_pct + "% from spot")}
+        ${mktStat("Expected move", fmtNum(an.expected_move.lower, 0) + " – " + fmtNum(an.expected_move.upper, 0), an.expected_move.days + " day · 1σ")}
+      </div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card"><div class="card-title">Support (OI clusters)</div>
+          <table class="tbl"><thead><tr><th>Strike</th><th>Distance</th><th>OI</th></tr></thead><tbody>
+          ${(srz.support || []).slice(0, 6).map(x => '<tr><td><b>' + fmtNum(x.strike, 0) + '</b></td><td class="down">' + x.distance_pct + '%</td><td>' + fmtNum(x.oi, 0) + '</td></tr>').join("") || '<tr><td colspan="3" class="muted">No support cluster.</td></tr>'}
+          </tbody></table>
+          <div class="muted small" style="margin-top:8px">${esc(srz.note || "")} · Confidence ${esc(srz.confidence || "")}</div>
+        </div>
+        <div class="card"><div class="card-title">Resistance (OI clusters)</div>
+          <table class="tbl"><thead><tr><th>Strike</th><th>Distance</th><th>OI</th></tr></thead><tbody>
+          ${(srz.resistance || []).slice(0, 6).map(x => '<tr><td><b>' + fmtNum(x.strike, 0) + '</b></td><td class="up">' + x.distance_pct + '%</td><td>' + fmtNum(x.oi, 0) + '</td></tr>').join("") || '<tr><td colspan="3" class="muted">No resistance cluster.</td></tr>'}
+          </tbody></table>
+          <div class="muted small" style="margin-top:8px">${esc(srz.note || "")}</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-title">Scenarios (not predictions)</div>
+        ${a.scenarios.map(sc => '<div class="spread" style="padding:8px 0;border-bottom:1px solid var(--border)"><span><b>' + esc(sc.name) + '</b> → target <b>' + fmtNum(sc.target, 0) + '</b><div class="muted small">Invalidated: ' + (sc.invalidated_below ? "below " + fmtNum(sc.invalidated_below, 0) : "") + (sc.invalidated_above ? "above " + fmtNum(sc.invalidated_above, 0) : "") + '</div></span><span class="badge">' + esc(sc.label) + '</span></div>').join("")}
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-title">Signal breakdown</div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          ${Object.keys(sig.components || {}).map(k => '<span class="badge">' + k + ' ' + (sig.components[k] * 100).toFixed(0) + '</span>').join("")}
+        </div>
+        <div class="muted small" style="margin-top:8px">${esc(sig.disclaimer || "")}</div>
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-title">Suggested strategies</div>
+        <div class="grid-cards">
+          ${a.suggestions.map(s => '<div class="card"><div class="spread"><b>' + esc(s.display) + '</b><span class="badge ' + (s.max_loss < 0 && s.max_profit > 0 ? "ok" : "wait") + '">' + esc(s.risk_label) + '</span></div><div class="row small muted" style="margin-top:8px"><span>Max P ' + fmtNum(s.max_profit, 0) + '</span><span>Max L ' + fmtNum(s.max_loss, 0) + '</span><span>Margin ' + fmtInr(s.est_margin) + '</span></div></div>').join("")}
+        </div>
+        <div class="muted small" style="margin-top:8px">Estimates only. Verify margin with your broker before trading.</div>
+      </div>`;
+  }
+
+  function optChain(body, a) {
+    const an = a.analytics, contracts = a.contracts || [];
+    body.innerHTML = `
+      ${optHeader(a.meta, an)}
+      <div class="toolbar" style="margin-top:12px"><div class="search-input"><span>🔍</span><input id="optChainSearch" placeholder="Filter by strike…"></div>
+      <span class="muted small">${contracts.length} contracts · Greeks are Black-Scholes "Calculated" values</span></div>
+      <div class="table-wrap" style="margin-top:12px"><table class="tbl" style="font-size:12px">
+        <thead><tr><th>CALL LTP</th><th>CALL OI</th><th>CALL ΔOI</th><th>Vol</th><th>IV</th><th>STRIKE</th><th>IV</th><th>Vol</th><th>PUT ΔOI</th><th>PUT OI</th><th>PUT LTP</th></tr></thead>
+        <tbody id="optChainRows"></tbody></table></div>`;
+    const rows = $("#optChainRows");
+    const byStrike = {};
+    contracts.forEach(c => { (byStrike[c.strike] = byStrike[c.strike] || {})[c.option_type] = c; });
+    const strikes = Object.keys(byStrike).map(Number).sort((x, y) => y - x);
+    const render = (q) => {
+      const ql = (q || "").toLowerCase();
+      rows.innerHTML = strikes.filter(s => !ql || String(s).includes(ql)).map(s => {
+        const ce = byStrike[s].CE, pe = byStrike[s].PE;
+        const cell = (c, side) => {
+          if (!c) return '<td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td><td class="muted">—</td>';
+          if (side === "ce") return '<td><b>' + fmtNum(c.ltp, 2) + '</b></td><td>' + fmtNum(c.oi, 0) + '</td><td class="' + (c.change_oi >= 0 ? "up" : "down") + '">' + (c.change_oi >= 0 ? "+" : "") + fmtNum(c.change_oi, 0) + '</td><td>' + fmtNum(c.volume, 0) + '</td><td>' + (c.iv * 100).toFixed(1) + '</td>';
+          return '<td>' + (c.iv * 100).toFixed(1) + '</td><td>' + fmtNum(c.volume, 0) + '</td><td class="' + (c.change_oi >= 0 ? "up" : "down") + '">' + (c.change_oi >= 0 ? "+" : "") + fmtNum(c.change_oi, 0) + '</td><td>' + fmtNum(c.oi, 0) + '</td><td><b>' + fmtNum(c.ltp, 2) + '</b></td>';
+        };
+        const atm = s === an.max_pain.max_pain ? " style='background:var(--accent-soft)'" : "";
+        return '<tr' + atm + '>' + cell(ce, "ce") + '<td style="font-weight:700;border-left:1px solid var(--border);border-right:1px solid var(--border)">' + fmtNum(s, 0) + '</td>' + cell(pe, "pe") + '</tr>';
+      }).join("") || '<tr><td colspan="11" class="muted">No strikes match.</td></tr>';
+    };
+    render("");
+    $("#optChainSearch").addEventListener("input", e => render(e.target.value));
+  }
+
+  function optOI(body, a) {
+    const m = a.meta, an = a.analytics;
+    const oi = an.oi, contracts = a.contracts || [];
+    const ce = {}, pe = {};
+    contracts.forEach(c => { (c.option_type === "CE" ? ce : pe)[c.strike] = c; });
+    const strikes = Object.keys(ce).map(Number).sort((x, y) => y - x).filter(s => pe[s]);
+    const maxCe = Math.max(...Object.values(ce).map(c => c.oi), 1);
+    const maxPe = Math.max(...Object.values(pe).map(c => c.oi), 1);
+    const bar = (v, max, dir) => {
+      const w = Math.max(4, Math.round(v / max * 100));
+      return '<div class="oi-bar"><div class="oi-fill ' + (dir === "ce" ? "ce" : "pe") + '" style="width:' + w + '%"></div></div>';
+    };
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="dash-grid" style="margin-top:14px">
+        ${mktStat("Total CE OI", fmtNum(oi.total_ce_oi, 0), "Δ " + (oi.ce_change_oi >= 0 ? "+" : "") + fmtNum(oi.ce_change_oi, 0))}
+        ${mktStat("Total PE OI", fmtNum(oi.total_pe_oi, 0), "Δ " + (oi.pe_change_oi >= 0 ? "+" : "") + fmtNum(oi.pe_change_oi, 0))}
+        ${mktStat("PCR (OI)", oi.pcr_oi ?? "—", "positioning gauge")}
+        ${mktStat("PCR (Vol)", an.pcr.pcr_volume ?? "—", "")}
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-title">Open Interest by strike</div>
+        <table class="tbl"><thead><tr><th>Strike</th><th>CE OI</th><th>CE bar</th><th>PE bar</th><th>PE OI</th></tr></thead><tbody>
+        ${strikes.slice(0, 26).map(s => '<tr><td><b>' + fmtNum(s, 0) + '</b></td><td>' + fmtNum(ce[s].oi, 0) + '</td><td style="min-width:120px">' + bar(ce[s].oi, maxCe, "ce") + '</td><td style="min-width:120px">' + bar(pe[s].oi, maxPe, "pe") + '</td><td>' + fmtNum(pe[s].oi, 0) + '</td></tr>').join("")}
+        </tbody></table>
+        <div class="muted small" style="margin-top:8px">PCR is a positioning gauge, not a timing signal.</div>
+      </div>`;
+  }
+
+  function optIV(body, a) {
+    const m = a.meta, an = a.analytics;
+    const iv = an.iv, contracts = a.contracts || [];
+    const ce = {}, pe = {};
+    contracts.forEach(c => { (c.option_type === "CE" ? ce : pe)[c.strike] = c; });
+    const strikes = Object.keys(ce).map(Number).sort((x, y) => x - y).filter(s => pe[s]);
+    const pts = strikes.map(s => '<span style="font-size:11px;opacity:.75">' + (ce[s].iv * 100).toFixed(0) + '</span>').join("");
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="dash-grid" style="margin-top:14px">
+        ${mktStat("ATM IV", iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—", "regime " + esc(iv.regime))}
+        ${mktStat("ATM Put IV", iv.atm_put_iv ? (iv.atm_put_iv * 100).toFixed(1) + "%" : "—", "spread " + (iv.iv_spread ? (iv.iv_spread * 100).toFixed(1) + "%" : "—"))}
+        ${mktStat("Skew CE slope", iv.skew_ce_slope, "per strike")}
+        ${mktStat("Skew PE slope", iv.skew_pe_slope, "per strike")}
+      </div>
+      <div class="grid-2" style="margin-top:16px">
+        <div class="card"><div class="card-title">IV smile (ATM-centred)</div>
+          <div style="height:140px;display:flex;align-items:flex-end;gap:2px">${strikes.map(s => '<div style="flex:1;background:' + (s === an.max_pain.max_pain ? "var(--ok)" : "var(--accent)") + ';height:' + Math.max(6, (ce[s].iv / Math.max(iv.atm_iv, 0.01)) * 100) + '%;opacity:.85" title="' + s + ' ' + (ce[s].iv * 100).toFixed(1) + '%"></div>').join("")}</div>
+          <div class="row small muted" style="margin-top:6px"><span>CE IV bars · dark = max pain</span><span class="grow"></span><span>${esc(iv.note)}</span></div>
+        </div>
+        <div class="card"><div class="card-title">Term structure (ATM IV by expiry)</div>
+          <div class="muted small">Loaded from live chain for each expiry.</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-title">Sample Greeks (Black-Scholes "Calculated")</div>
+        <table class="tbl"><thead><tr><th>Strike</th><th>Type</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>IV</th></tr></thead><tbody>
+        ${contracts.filter(c => Math.abs(c.strike - m.spot) < 200).slice(0, 10).map(c => '<tr><td><b>' + fmtNum(c.strike, 0) + '</b></td><td>' + c.option_type + '</td><td>' + c.delta + '</td><td>' + c.gamma + '</td><td>' + c.theta + '</td><td>' + c.vega + '</td><td>' + (c.iv * 100).toFixed(1) + '%</td></tr>').join("")}
+        </tbody></table>
+      </div>`;
+  }
+
+  function optMove(body, a) {
+    const m = a.meta, an = a.analytics;
+    const mp = an.max_pain, em = an.expected_move;
+    const lo = Math.min(em.lower, mp.max_pain), hi = Math.max(em.upper, mp.max_pain);
+    const span = (hi - lo) || 1;
+    const pos = s => Math.max(2, Math.min(98, (s - lo) / span * 100));
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="dash-grid" style="margin-top:14px">
+        ${mktStat("Max pain", fmtNum(mp.max_pain, 0), (mp.distance_pct >= 0 ? "+" : "") + mp.distance_pct + "% vs spot")}
+        ${mktStat("Exp. move (1σ)", fmtNum(em.lower, 0) + " – " + fmtNum(em.upper, 0), em.days + " day · ATM IV " + (em.atm_iv * 100).toFixed(1) + "%")}
+        ${mktStat("Spot", fmtNum(m.spot, 2), "")}
+      </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-title">Strike ladder</div>
+        <div style="position:relative;height:40px;margin:30px 10px 10px">
+          <div style="position:absolute;top:0;bottom:0;left:${pos(m.spot)}%;border-left:2px solid var(--ok)">
+            <span class="badge ok" style="position:absolute;top:-24px;transform:translateX(-50%);white-space:nowrap">Spot ${fmtNum(m.spot, 0)}</span>
+          </div>
+          <div style="position:absolute;top:8px;bottom:8px;left:${pos(em.lower)}%;right:${100 - pos(em.upper)}%;background:var(--accent-soft);border:1px dashed var(--accent)"><span class="badge" style="position:absolute;bottom:-22px;left:50%;transform:translateX(-50%);white-space:nowrap">1σ range</span></div>
+          <div style="position:absolute;top:0;bottom:0;left:${pos(mp.max_pain)}%;border-left:2px solid var(--accent)"><span class="badge wait" style="position:absolute;top:-24px;transform:translateX(-50%);white-space:nowrap">Max pain</span></div>
+        </div>
+        <div class="muted small" style="margin-top:10px">${esc(em.label)} · ${esc(mp.note)}</div>
+      </div>`;
+  }
+
+  function optUnusual(body, a) {
+    const m = a.meta, an = a.analytics;
+    const ua = an.unusual_activity || [];
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="card" style="margin-top:16px"><div class="card-title">Unusual activity (volume-to-OI spikes)</div>
+        <table class="tbl"><thead><tr><th>Contract</th><th>Strike</th><th>Type</th><th>Volume</th><th>OI</th><th>Vol/OI</th><th>ΔOI</th><th>IV</th></tr></thead><tbody>
+        ${ua.map(u => '<tr><td><b>' + esc(u.contract) + '</b></td><td>' + fmtNum(u.strike, 0) + '</td><td>' + u.option_type + '</td><td>' + fmtNum(u.volume, 0) + '</td><td>' + fmtNum(u.oi, 0) + '</td><td><span class="badge">' + u.vol_oi_ratio + 'x</span></td><td class="' + (u.change_oi >= 0 ? "up" : "down") + '">' + (u.change_oi >= 0 ? "+" : "") + fmtNum(u.change_oi, 0) + '</td><td>' + (u.iv * 100).toFixed(1) + '%</td></tr>').join("") || '<tr><td colspan="8" class="muted">No unusual activity above the threshold.</td></tr>'}
+        </tbody></table>
+        <div class="muted small" style="margin-top:8px">Evidence of order flow, never a trade recommendation.</div>
+      </div>`;
+  }
+
+  function optStrategy(body, a) {
+    const m = a.meta, an = a.analytics;
+    body.innerHTML = `
+      ${optHeader(m, an)}
+      <div class="card" style="margin-top:16px"><div class="card-title">Strategy Lab (${esc(m.underlying)} · ${esc(m.expiry)})</div>
+        <div class="grid-cards" id="optStratGrid">
+          ${a.strategies.map(s => '<div class="card" data-name="' + esc(s.name) + '" style="cursor:pointer"><div class="spread"><b>' + esc(s.display) + '</b><span class="badge ' + (s.risk_label === "DEFINED" ? "ok" : "wait") + '">' + esc(s.risk_label) + '</span></div><div class="row small muted" style="margin-top:8px"><span>Max P ' + fmtNum(s.max_profit, 0) + '</span><span class="grow"></span><span>Max L ' + fmtNum(s.max_loss, 0) + '</span></div><div class="muted small" style="margin-top:6px">Breakeven: ' + (s.breakevens || []).map(b => fmtNum(b, 0)).join(" / ") + '</div></div>').join("")}
+        </div>
+        <div id="optPayoff" style="margin-top:16px"></div>
+        <div class="muted small" style="margin-top:8px">${esc(a.strategies[0] ? a.strategies[0].note : "")} Past performance does not guarantee future results.</div>
+      </div>`;
+    $$("#optStratGrid [data-name]").forEach(card => card.addEventListener("click", () => {
+      const name = card.dataset.name;
+      const s = a.strategies.find(x => x.name === name);
+      if (!s) return;
+      mktAudit("OPTIONS strategy " + name);
+      const pay = s.payoff || { x: [], y: [] };
+      const ys = pay.y || [];
+      const max = Math.max(...ys.map(Math.abs), 1);
+      const pts = (pay.x || []).map((x, i) => x + ":" + ys[i]);
+      $("#optPayoff").innerHTML = `
+        <div class="card"><div class="card-title">Payoff — ${esc(s.display)}</div>
+          <div class="row" style="flex-wrap:wrap;gap:12px">
+            ${mktStat("Max profit", fmtNum(s.max_profit, 0), "")}
+            ${mktStat("Max loss", fmtNum(s.max_loss, 0), "")}
+            ${mktStat("Est. margin", fmtInr(s.est_margin), "verify with broker")}
+            ${mktStat("Net premium", fmtNum(s.net_premium, 2), "per share")}
+          </div>
+          <div style="position:relative;height:160px;margin-top:10px">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">
+              <line x1="0" y1="50" x2="100" y2="50" stroke="var(--border)" stroke-width=".3"/>
+              <line x1="50" y1="0" x2="50" y2="100" stroke="var(--border)" stroke-width=".3"/>
+              <polyline points="${pts.map(p => { const [x, y] = p.split(":"); return (x - pay.x[0]) / (pay.x[pay.x.length - 1] - pay.x[0]) * 100 + "," + (50 - y / max * 45); }).join(" ")}" fill="none" stroke="var(--ok)" stroke-width=".8" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="muted small" style="margin-top:6px">X = underlying price · Y = P&L per lot (₹).</div>
+        </div>`;
+    }));
+  }
+
+  function optPaper(body, a) {
+    const m = a.meta;
+    body.innerHTML = `
+      ${optHeader(m, a.analytics)}
+      <div class="card" style="margin-top:16px"><div class="card-title">Paper option trade (simulated — no real money)</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Expiry</label><input id="opExpiry" value="' + esc(m.expiry) + '"></div>
+          <div class="field grow" style="margin:0"><label>Strike</label><input id="opStrike" type="number" placeholder="' + fmtNum(m.spot, 0) + '"></div>
+          <div class="field grow" style="margin:0"><label>Type</label><select id="opType"><option value="CE">Call (CE)</option><option value="PE">Put (PE)</option></select></div>
+          <div class="field grow" style="margin:0"><label>Action</label><select id="opAction"><option value="BUY">Buy</option><option value="SELL">Sell (short)</option></select></div>
+          <div class="field grow" style="margin:0"><label>Qty (lots × ${esc(m.underlying)})</label><input id="opQty" type="number" value="1" min="1"></div>
+          <div class="field grow" style="margin:0"><label>Entry price (₹)</label><input id="opEntry" type="number" step="0.05"></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="opOpen">Open paper trade</button></div>
+        </div>
+        <div class="hint" style="margin-top:10px">PAPER TRADE only. There is no live option routing in this system.</div>
+      </div>
+      <div id="optPaperList" style="margin-top:16px"></div>`;
+    const list = $("#optPaperList");
+    const render = () => {
+      list.innerHTML = mktLoading();
+      window.OptionsClient.paperPositions().then(ps => {
+        list.innerHTML = '<div class="card"><div class="card-title">Paper positions</div>' +
+          '<table class="tbl"><thead><tr><th>ID</th><th>Contract</th><th>Action</th><th>Qty</th><th>Entry</th><th>Status</th><th>P&L</th></tr></thead><tbody>' +
+          (ps.map(p => '<tr><td class="muted small">' + esc(p.id) + '</td><td><b>' + esc(p.underlying + " " + p.strike + p.option_type + " " + p.expiry) + '</b></td><td><span class="badge ' + (p.action === "BUY" ? "ok" : "err") + '">' + p.action + '</span></td><td>' + p.quantity + '</td><td>' + fmtNum(p.entry_price, 2) + '</td><td class="muted">' + p.status + '</td><td class="' + (p.pnl >= 0 ? "up" : p.pnl < 0 ? "down" : "") + '">' + fmtNum(p.pnl, 0) + '</td></tr>').join("") ||
+          '<tr><td colspan="7" class="muted">No paper option positions yet.</td></tr>') +
+          '</tbody></table></div>';
+      }).catch(e => { list.innerHTML = mktError(e); });
+    };
+    $("#opOpen").addEventListener("click", () => {
+      const payload = {
+        underlying: a.meta.underlying,
+        expiry: $("#opExpiry").value.trim(),
+        strike: parseFloat($("#opStrike").value),
+        option_type: $("#opType").value,
+        action: $("#opAction").value,
+        quantity: parseInt($("#opQty").value, 10),
+        entry_price: parseFloat($("#opEntry").value),
+      };
+      if (!payload.expiry || !payload.strike || !payload.entry_price || payload.quantity < 1) { toast("Option paper", "Fill expiry, strike, quantity and entry price.", "err"); return; }
+      window.OptionsClient.paperOpen(payload).then(r => { toast("Option paper", "Paper position opened " + r.opened.id, "ok"); mktAudit("OPTIONS PAPER " + payload.action + " " + payload.strike + payload.option_type); render(); }).catch(e => toast("Option paper", e.message, "err"));
+    });
+    render();
+  }
+
+  function optBacktest(body, a) {
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Option strategy backtest (simulated path)</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Strategy</label><select id="obStrat"><option value="iron_condor">Iron Condor</option><option value="strangle">Strangle</option><option value="bull_call_spread">Bull Call Spread</option><option value="bear_put_spread">Bear Put Spread</option><option value="covered_call">Covered Call</option></select></div>
+          <div class="field grow" style="margin:0"><label>Notional (₹)</label><input id="obNotional" type="number" value="100000" min="1000"></div>
+          <div class="field grow" style="margin:0"><label>Hold days</label><input id="obDays" type="number" value="30" min="1" max="250"></div>
+          <div class="field grow" style="margin:0"><label>Premium %</label><input id="obPrem" type="number" value="4" min="0.5" max="50" step="0.5"></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="obRun">Run backtest</button></div>
+        </div>
+        <div class="hint" style="margin-top:10px">Simulated path using a configured win-rate with costs and slippage. Not a real result.</div>
+      </div>
+      <div id="obBody" style="margin-top:16px"></div>`;
+    const run = () => {
+      const b = $("#obBody");
+      b.innerHTML = mktLoading();
+      window.OptionsClient.backtest({
+        strategy: $("#obStrat").value,
+        notional: parseFloat($("#obNotional").value) || 100000,
+        hold_days: parseInt($("#obDays").value, 10) || 30,
+        premium_pct: (parseFloat($("#obPrem").value) || 4) / 100,
+      }).then(r => {
+        mktAudit("OPTIONS backtest " + r.strategy + " -> " + r.net_pnl);
+        b.innerHTML = `
+          <div class="dash-grid">
+            ${mktStat("Gross P&L", fmtInr(r.gross_pnl), "win rate " + r.win_rate + "")}
+            ${mktStat("Costs", fmtInr(r.costs), "fees + slippage")}
+            ${mktStat("Net P&L", fmtInr(r.net_pnl), r.net_pnl >= 0 ? "positive" : "negative")}
+            ${mktStat("Wins / Losses", r.wins + " / " + r.losses, r.hold_days + " days")}
+          </div>
+          <div class="card" style="margin-top:16px"><div class="card-title">Daily P&L path</div>
+            <div style="height:130px;display:flex;align-items:flex-end;gap:2px">${r.daily.map(d => '<div style="flex:1;background:' + (d.pnl >= 0 ? "var(--ok)" : "var(--err)") + ';height:' + Math.max(4, Math.min(100, Math.abs(d.pnl) / Math.max(...r.daily.map(x => Math.abs(x.pnl)), 1) * 100)) + '%;opacity:.85" title="Day ' + d.day + ' ' + fmtInr(d.pnl) + '"></div>').join("")}</div>
+            <div class="muted small" style="margin-top:6px">${esc(r.disclaimer)}</div>
+          </div>`;
+      }).catch(e => { b.innerHTML = mktError(e); });
+    };
+    $("#obRun").addEventListener("click", run);
+    run();
   }
 
   function mPortfolio(body) {

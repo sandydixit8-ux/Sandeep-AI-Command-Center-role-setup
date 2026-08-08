@@ -8,17 +8,18 @@ from .tools import (
     GMAIL_TOOLS,
     JOBSEARCH_TOOLS,
     MARKET_TOOLS,
+    OPTION_TOOLS,
     RISK_TOOLS,
     build_tools,
 )
 
 _EXTRA_TOOLS = {
-    "commander": FINANCE_TOOLS + JOBSEARCH_TOOLS + GMAIL_TOOLS + MARKET_TOOLS,
+    "commander": FINANCE_TOOLS + JOBSEARCH_TOOLS + GMAIL_TOOLS + MARKET_TOOLS + OPTION_TOOLS,
     "finance": FINANCE_TOOLS,
     "jobsearch": JOBSEARCH_TOOLS,
     "exec": GMAIL_TOOLS,
     "bd": GMAIL_TOOLS,
-    "market": MARKET_TOOLS,
+    "market": MARKET_TOOLS + OPTION_TOOLS,
     "risk": RISK_TOOLS,
 }
 

@@ -717,3 +717,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .up { color: var(--ok); font-weight: 600; }
 .down { color: var(--err); font-weight: 600; }
+
+/* Option Chain Intelligence */
+.oi-bar { display: flex; align-items: center; width: 100%; }
+.oi-fill { height: 8px; border-radius: 4px; min-width: 2px; }
+.oi-fill.ce { background: var(--err); opacity: .7; }
+.oi-fill.pe { background: var(--ok); opacity: .7; }
+#optTabs button.sel { background: var(--accent); color: var(--accent-contrast); }
+.table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); }
+.table-wrap .tbl { margin: 0; }
