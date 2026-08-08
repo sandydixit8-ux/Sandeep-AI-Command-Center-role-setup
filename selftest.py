@@ -235,6 +235,26 @@ def main() -> int:
     sr = mkt.support_resistance(series)
     check("support < resistance", sr["support"] < sr["resistance"])
 
+    print("\n== market engine: provider ==")
+    prov = mkt.get_provider()
+    check("default provider is live moneycontrol", prov.name() == "moneycontrol-live", prov.name())
+    st = prov.status()
+    check("provider status has mode", st["mode"] in ("live", "fallback"), st.get("mode"))
+    check("provider status has quality", "quality" in st and st["quality"] != "", st.get("quality"))
+    mock_prov = mkt.MockMarketProvider()
+    check("mock provider name", mock_prov.name() == "mock-nse-demo")
+    check("mock indices labelled delayed", all("Delayed" in i["quality"] for i in mock_prov.get_indices()))
+    # Fallback path: a degraded provider must return mock data without raising.
+    degraded = mkt.MoneycontrolMarketProvider()
+    degraded._degraded_until = 10 ** 12  # force circuit breaker open
+    fb_idx = degraded.get_indices()
+    check("degraded provider falls back for indices", len(fb_idx) == len(mkt.INDICES) and all("Delayed" in i["quality"] for i in fb_idx), str(len(fb_idx)))
+    fb_stock = degraded.get_stock("RELIANCE")
+    check("degraded provider falls back for stocks", fb_stock is not None and fb_stock["source"] == "mock-nse-demo", str(fb_stock and fb_stock.get("source")))
+    fb_ohlc = degraded.ohlc("RELIANCE", 30)
+    check("degraded provider falls back for ohlc", len(fb_ohlc) == 30 and all("date" in b for b in fb_ohlc), str(len(fb_ohlc)))
+    check("degraded status reports fallback", degraded.status()["mode"] == "fallback", degraded.status().get("mode"))
+
     print("\n== market engine: scoring ==")
     sc = mkt.market_score("TCS")
     check("score in 0..100", 0 <= sc["score"] <= 100, str(sc["score"]))

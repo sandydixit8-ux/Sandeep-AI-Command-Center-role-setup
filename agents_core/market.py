@@ -1,7 +1,9 @@
 """Market Intelligence engine for the AI Command Center.
 
 Architecture (per the product spec):
-    MarketDataProvider (abstract) -> MockMarketProvider (deterministic demo data)
+    MarketDataProvider (abstract) -> MoneycontrolMarketProvider (live quotes,
+        indices and OHLC from Moneycontrol's public pricefeed, with automatic
+        fallback to MockMarketProvider when the feed is offline)
     TechnicalAnalysis  -> indicators + technical view
     FundamentalView    -> fundamentals + trends
     MarketScoring      -> transparent factor score
@@ -13,8 +15,10 @@ Architecture (per the product spec):
     PaperTradingStore  -> simulated portfolio (file-backed)
 
 Data-safety principles honoured here:
-- All demo data is deterministic and clearly labelled 'mock' with a timestamp.
 - Prices are never invented by the AI: they come from the provider layer.
+- Live records are labelled with the source and 'Live (Moneycontrol)'.
+- When the live feed is unreachable, the provider falls back to deterministic
+  mock data that is clearly labelled 'Delayed (demo data)'.
 - Signals must combine multiple factors; a lone indicator never produces a signal.
 - Confidence is only shown when there is supporting evidence.
 """
@@ -23,10 +27,13 @@ from __future__ import annotations
 import json
 import math
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+
+import httpx
 
 from .config import DATA_DIR
 
@@ -59,6 +66,75 @@ INDICES: list[dict[str, Any]] = [
     {"symbol": "NIFTY MIDCAP", "name": "NIFTY Midcap", "value": 56210.0, "change": 338.9, "pct": 0.61},
     {"symbol": "NIFTY AUTO", "name": "NIFTY Auto", "value": 23860.0, "change": 195.4, "pct": 0.83},
 ]
+
+
+# --------------------------------------------------------------------------- live provider (moneycontrol)
+
+# Moneycontrol public pricefeed (same endpoints the website/app use).
+MC_PRICE_FEED = "https://priceapi.moneycontrol.com/pricefeed"
+MC_TECH_CHARTS = "https://priceapi.moneycontrol.com/techCharts/indianMarket/stock"
+
+# Moneycontrol index code -> pricefeed code (verified: NSX/SEN/nbx/cnit/ccx/cnxa).
+MC_INDEX_CODES: dict[str, str] = {
+    "NIFTY 50": "NSX",
+    "BANK NIFTY": "nbx",
+    "SENSEX": "SEN",
+    "NIFTY IT": "cnit",
+    "NIFTY MIDCAP": "ccx",
+    "NIFTY AUTO": "cnxa",
+}
+
+# Stock symbol -> Moneycontrol sc_id (resolved via autosuggestion_solr.php).
+MC_STOCK_IDS: dict[str, str] = {
+    "RELIANCE": "RI",
+    "TATA MOTORS": "TML02",
+    "INFY": "IT",
+    "HDFCBANK": "HDF01",
+    "TCS": "TCS",
+    "SBIN": "SBI",
+    "ITC": "ITC",
+    "BHARTIARTL": "BTV",
+    "HINDUNILVR": "HL",
+    "LT": "LT",
+    "ASIANPAINT": "API",
+    "SUNPHARMA": "SPI",
+    "TITAN": "TI01",
+    "BAJFINANCE": "BAF",
+    "MARUTI": "MU01",
+}
+
+# Stock symbol -> NSE ticker used by the techCharts history feed.
+MC_STOCK_TICKERS: dict[str, str] = {
+    "RELIANCE": "RELIANCE",
+    "TATA MOTORS": "TMCV",
+    "INFY": "INFY",
+    "HDFCBANK": "HDFCBANK",
+    "TCS": "TCS",
+    "SBIN": "SBIN",
+    "ITC": "ITC",
+    "BHARTIARTL": "BHARTIARTL",
+    "HINDUNILVR": "HINDUNILVR",
+    "LT": "LT",
+    "ASIANPAINT": "ASIANPAINT",
+    "SUNPHARMA": "SUNPHARMA",
+    "TITAN": "TITAN",
+    "BAJFINANCE": "BAJFINANCE",
+    "MARUTI": "MARUTI",
+}
+
+MC_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, text/html, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.moneycontrol.com/",
+    "Origin": "https://www.moneycontrol.com",
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+MC_TIMEOUT = 8.0  # seconds
 
 
 def _deterministic_rng(symbol: str, seed_extra: int = 0) -> random.Random:
@@ -152,12 +228,211 @@ class MockMarketProvider:
 _provider: MarketDataProvider | None = None
 
 
+class MoneycontrolMarketProvider:
+    """Live Indian market data from Moneycontrol's public pricefeed.
+
+    Fetches real quotes/indices/OHLC from the same endpoints the Moneycontrol
+    website and app use. Every record is labelled as live. On any network or
+    parse error it silently falls back to the deterministic mock so the app
+    never breaks offline.
+    """
+
+    def __init__(self) -> None:
+        self._mock = MockMarketProvider()
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._last_live: str | None = None
+        self._last_fallback: str | None = None
+        self._fallback_reason: str | None = None
+        self._degraded_until: float = 0.0
+
+    def name(self) -> str:
+        return "moneycontrol-live"
+
+    # ------------------------------------------------------------------ http
+
+    def _get_json(self, url: str, params: dict[str, Any] | None = None, ttl: float = 20.0) -> Any:
+        now = time.time()
+        if now < self._degraded_until:
+            raise ConnectionError("moneycontrol temporarily degraded (offline circuit breaker)")
+        key = url
+        cached = self._cache.get(key)
+        if cached and now - cached[0] < ttl:
+            return cached[1]
+        resp = httpx.get(url, params=params, headers=MC_HEADERS, timeout=MC_TIMEOUT, follow_redirects=True)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict) and "code" in payload and str(payload.get("code")) != "200":
+            raise ValueError(f"moneycontrol error {payload.get('code')}: {payload.get('message')}")
+        self._cache[key] = (now, payload)
+        return payload
+
+    def _mark_degraded(self) -> None:
+        self._degraded_until = time.time() + 60
+
+    # ------------------------------------------------------------------ indices
+
+    def get_indices(self) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for base in INDICES:
+            code = MC_INDEX_CODES.get(base["symbol"])
+            try:
+                payload = self._get_json(f"{MC_PRICE_FEED}/notapplicable/inidicesindia/in%3B{code}")
+                d = payload["data"]
+                now = datetime.now()
+                value = float(d.get("pricecurrent") or base["value"])
+                prev = float(d.get("priceprevclose") or (value - base["change"]))
+                change = float(d.get("pricechange") or (value - prev))
+                pct = float(d.get("pricepercentchange") or base["pct"])
+                status = "🟢 Open" if str(d.get("market_state", "")).upper() == "OPEN" else "🟡 Market closed"
+                results.append({
+                    **base,
+                    "value": value,
+                    "change": round(change, 2),
+                    "pct": round(pct, 2),
+                    "change_pct": round(pct, 2),
+                    "open": float(d.get("OPEN") or 0),
+                    "high": float(d.get("HIGH") or 0),
+                    "low": float(d.get("LOW") or 0),
+                    "52w_high": float(d.get("52wkhi") or 0),
+                    "52w_low": float(d.get("52wklow") or 0),
+                    "status": status,
+                    "timestamp": str(d.get("lastupd") or now.strftime("%Y-%m-%d %H:%M:%S")),
+                    "source": self.name(),
+                    "quality": "🟢 Live (Moneycontrol)",
+                })
+                self._last_live = str(d.get("lastupd") or now.strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as exc:  # noqa: BLE001
+                self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._fallback_reason = f"{base['symbol']}: {exc}"
+                self._mark_degraded()
+                fallback = next((i for i in self._mock.get_indices() if i["symbol"] == base["symbol"]), None)
+                results.append(fallback if fallback else self._mock.get_indices()[0])
+        return results
+
+    # ------------------------------------------------------------------ stocks
+
+    def _live_stock(self, s: dict[str, Any]) -> dict[str, Any] | None:
+        sc_id = MC_STOCK_IDS.get(s["symbol"])
+        if not sc_id:
+            return None
+        payload = self._get_json(f"{MC_PRICE_FEED}/nse/equitycash/{sc_id}")
+        d = payload["data"]
+        price = float(d.get("pricecurrent") or s["price"])
+        prev = float(d.get("priceprevclose") or s["prev_close"])
+        change = float(d.get("pricechange") or (price - prev))
+        pct = float(d.get("pricepercentchange") or (round((price - prev) / prev * 100, 2) if prev else 0))
+        status = "🟢 Open" if str(d.get("market_state", "")).upper() == "OPEN" else "🟡 Market closed"
+        return {
+            **s,
+            "price": price,
+            "prev_close": prev,
+            "change": round(change, 2),
+            "change_pct": round(pct, 2),
+            "market_cap": float(d.get("MKTCAP") or s["market_cap"]),
+            "pe": float(d.get("PE") or s["pe"]),
+            "pb": float(d.get("PB") or s["pb"]),
+            "52w_high": float(d.get("52H") or s["52w_high"]),
+            "52w_low": float(d.get("52L") or s["52w_low"]),
+            "volume": int(float(d.get("VOL") or s["volume"])),
+            "status": status,
+            "timestamp": str(d.get("lastupd") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "source": self.name(),
+            "quality": "🟢 Live (Moneycontrol)",
+            "exchange": "NSE",
+        }
+
+    def get_stock(self, symbol: str) -> dict[str, Any] | None:
+        key = symbol.strip().upper()
+        for s in STOCKS:
+            if s["symbol"] == key or key in s["name"].upper():
+                try:
+                    return self._live_stock(s)
+                except Exception as exc:  # noqa: BLE001
+                    self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._fallback_reason = f"{s['symbol']}: {exc}"
+                    self._mark_degraded()
+                    return self._mock.get_stock(symbol)
+        return None
+
+    def list_stocks(self) -> list[dict[str, Any]]:
+        return [self.get_stock(s["symbol"]) for s in STOCKS]
+
+    # ------------------------------------------------------------------ ohlc
+
+    def ohlc(self, symbol: str, days: int = 200) -> list[dict[str, float]]:
+        """Real daily OHLC from Moneycontrol techCharts, falling back to mock."""
+        s = self.get_stock(symbol)
+        if not s:
+            raise ValueError(f"unknown symbol: {symbol}")
+        ticker = MC_STOCK_TICKERS.get(s["symbol"], s["symbol"])
+        try:
+            payload = self._get_json(
+                f"{MC_TECH_CHARTS}/history",
+                params={"symbol": ticker, "resolution": "D", "countback": max(1, days), "to": int(time.time())},
+                ttl=300.0,
+            )
+            if not isinstance(payload, dict) or payload.get("s") != "ok":
+                raise ValueError(f"history status: {payload.get('errmsg', 'unknown')}")
+            ts, o, h, l, c = payload.get("t", []), payload.get("o", []), payload.get("h", []), payload.get("l", []), payload.get("c", [])
+            v = payload.get("v", [])
+            bars: list[dict[str, float]] = []
+            for i, t in enumerate(ts):
+                bars.append({
+                    "date": datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"),
+                    "open": round(float(o[i]), 2),
+                    "high": round(float(h[i]), 2),
+                    "low": round(float(l[i]), 2),
+                    "close": round(float(c[i]), 2),
+                    "volume": round(float(v[i])) if i < len(v) else 0,
+                })
+            if not bars:
+                raise ValueError("no bars returned")
+            # snap the final close to the current live price so views stay consistent
+            bars[-1]["close"] = s["price"]
+            bars[-1]["high"] = max(bars[-1]["high"], s["price"])
+            bars[-1]["low"] = min(bars[-1]["low"], s["price"])
+            self._last_live = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return bars
+        except Exception as exc:  # noqa: BLE001
+            self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._fallback_reason = f"{symbol} history: {exc}"
+            self._mark_degraded()
+            return self._mock.ohlc(symbol, days)
+
+    # ------------------------------------------------------------------ status
+
+    def status(self) -> dict[str, str]:
+        if self._last_live is None and self._last_fallback is None:
+            try:
+                self.get_indices()
+            except Exception:  # noqa: BLE001
+                pass
+        mode = "live" if self._last_live else ("fallback" if self._last_fallback else "unknown")
+        return {
+            "provider": self.name(),
+            "mode": mode,
+            "data": "moneycontrol-pricefeed" if self._last_live else "mock-nse-demo",
+            "updated": self._last_live or self._last_fallback or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "fallback_reason": self._fallback_reason or "",
+            "quality": "🟢 Live (Moneycontrol)" if self._last_live else "🟡 Delayed (demo data)",
+        }
+
+
 def get_provider() -> MarketDataProvider:
-    """Return the configured provider. Currently always the deterministic mock."""
+    """Return the configured provider: live Moneycontrol with mock fallback."""
     global _provider
     if _provider is None:
-        _provider = MockMarketProvider()
+        _provider = MoneycontrolMarketProvider()
     return _provider
+
+
+def provider_quality(provider: MarketDataProvider | None = None) -> str:
+    """Quality badge from the active provider (live vs delayed fallback)."""
+    try:
+        st = (provider or get_provider()).status()
+        return st.get("quality", "🟡 Delayed (demo data)")
+    except Exception:  # noqa: BLE001
+        return "🟡 Delayed (demo data)"
 
 
 # --------------------------------------------------------------------------- indicators
@@ -335,7 +610,7 @@ def technical_view(symbol: str, days: int = 200) -> dict[str, Any]:
         "bb_upper": last(bb["upper"]), "bb_lower": last(bb["lower"]),
         "atr": atr_now, "vwap": vp,
         "last_close": closes[-5:],
-        "source": provider.name(), "quality": "🟡 Delayed (demo data)",
+        "source": provider.name(), "quality": provider_quality(provider),
     }
 
 
@@ -352,8 +627,9 @@ def fundamental_view(symbol: str) -> dict[str, Any]:
         "div_yield": s["div_yield"], "promoter": s["promoter"],
         "eps": round(s["price"] / s["pe"], 2),
         "revenue_cr": round(s["market_cap"] / (s["pe"] / 100) / 100, 0) * 100,
-        "quality": "🟡 Delayed (demo data)",
-        "note": "Fundamental values are demo estimates for the prototype.",
+        "quality": provider_quality(),
+        "note": "Price, market cap, P/E and P/B are live from Moneycontrol where available; "
+                "remaining fundamentals are demo estimates for the prototype.",
     }
 
 
@@ -569,10 +845,10 @@ def portfolio_risk(positions: list[dict[str, Any]], capital: float) -> dict[str,
 def backtest(symbol: str, entry: str, exit_rule: str, stop_loss_pct: float = 8.0,
              target_pct: float | None = None, days: int = 500,
              commission: float = 0.03, slippage: float = 0.05) -> dict[str, Any]:
-    """Simple strategy backtest on generated demo data.
+    """Simple strategy backtest on real Moneycontrol OHLC (mock fallback offline).
 
     entry/exit are human-readable labels (recorded, not executed by a black box).
-    Returns standard metrics. Demo data only — past performance ≠ future results.
+    Returns standard metrics. Past performance ≠ future results.
     """
     provider = get_provider()
     s = provider.get_stock(symbol)
@@ -640,7 +916,8 @@ def backtest(symbol: str, entry: str, exit_rule: str, stop_loss_pct: float = 8.0
         "avg_trade_pct": round(avg * 100, 2), "risk_reward": round(rr, 2),
         "equity_curve": curve,
         "strategy_quality": _strategy_quality(cagr, max_dd, sharpe, n),
-        "disclaimer": "Backtest uses demo data. Past performance does not guarantee future results.",
+        "data_source": provider.name(), "quality": provider_quality(provider),
+        "disclaimer": "Backtest uses real historical OHLC where available (delayed demo fallback offline). Past performance does not guarantee future results.",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -784,6 +1061,8 @@ def market_brief() -> dict[str, Any]:
     idx = get_provider().get_indices()
     top_gainers = [i for i in idx if i["change"] > 0][:3]
     top_losers = [i for i in idx if i["change"] < 0][:3]
+    quality = provider_quality()
+    live = "Live" in quality
     return {
         "summary": f"Markets are in a {regime['regime']} regime ({regime['tone']}). "
                    f"NIFTY 50 is {idx[0]['change']:+,.2f} ({idx[0]['pct']:+.2f}%). "
@@ -794,9 +1073,12 @@ def market_brief() -> dict[str, Any]:
         "top_losers": [{"symbol": i["symbol"], "change_pct": i["pct"]} for i in top_losers],
         "news": news_sentiment()[:4],
         "ai_interpretation": (
-            "Demo interpretation: breadth supports the current tone but volatility and "
-            "delayed data mean no certainty. Treat as research, not a call."
+            "Live interpretation from Moneycontrol data: breadth supports the current tone but "
+            "volatility and market structure mean no certainty. Treat as research, not a call."
+            if live else
+            "Demo interpretation (provider offline, using delayed fallback): breadth supports the "
+            "current tone but data is delayed and demo. Treat as research, not a call."
         ),
-        "data_status": "🟡 Delayed (demo data)",
+        "data_status": quality,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }

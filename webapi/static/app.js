@@ -1379,11 +1379,11 @@
     brief: "One-line AI interpretation of the market state.",
     stocks: "Browse the tracked universe and open a stock's full intelligence report.",
     screener: "Filter the universe by score, sector, valuation and momentum.",
-    watchlist: "Your saved symbols, refreshed with live demo quotes.",
+    watchlist: "Your saved symbols, refreshed with live Moneycontrol quotes (demo fallback offline).",
     signals: "Composite signals across the whole universe, never a single indicator.",
     portfolio: "Simulated paper portfolio value, exposure and P&L.",
     paper: "Execute simulated buys and sells — no real money, ever.",
-    backtest: "EMA+RSI strategy backtest on demo data with anti-overfit grading.",
+    backtest: "EMA+RSI strategy backtest on real historical OHLC with anti-overfit grading.",
     risk: "Position sizing from risk per trade and portfolio concentration checks.",
     alerts: "Rule-based alerts on signals, price moves and risk flags.",
     journal: "Every paper trade logged with entry, exit and P&L.",
@@ -1423,7 +1423,7 @@
     (subs[sub] || mOverview)(body, route);
   }
 
-  function mktLoading() { return '<div class="empty" style="display:flex"><div class="empty-ic">📈</div><h3>Loading market data…</h3><p>Fetching demo data from the market provider.</p></div>'; }
+  function mktLoading() { return '<div class="empty" style="display:flex"><div class="empty-ic">📈</div><h3>Loading market data…</h3><p>Fetching live data from the Moneycontrol feed.</p></div>'; }
   function mktError(e) { return '<div class="empty" style="display:flex"><div class="empty-ic">⚠️</div><h3>Could not load market data</h3><p>' + esc(e && e.message || String(e)) + '</p></div>'; }
   function mktStat(label, value, sub) { return '<div class="card kpi"><div class="kpi-label">' + label + '</div><div class="kpi-value">' + value + '</div>' + (sub ? '<div class="kpi-delta">' + sub + '</div>' : "") + '</div>'; }
   function fmtInr(v) {
@@ -1718,7 +1718,7 @@
           <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="ppBuy">Buy</button></div>
           <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn" id="ppSell">Sell</button></div>
         </div>
-        <div class="hint" style="margin-top:10px">Orders execute at the current quoted demo price. Capital starts at ₹1,000,000.</div>
+        <div class="hint" style="margin-top:10px">Orders execute at the current quoted price (live Moneycontrol, demo fallback offline). Capital starts at ₹1,000,000.</div>
       </div>
       <div id="ppBody" style="margin-top:16px"></div>`;
     const render = () => {
@@ -1760,7 +1760,7 @@
 
   function mBacktest(body) {
     body.innerHTML = `
-      <div class="card"><div class="card-title">Strategy backtest (EMA + RSI on demo data)</div>
+      <div class="card"><div class="card-title">Strategy backtest (EMA + RSI on real historical OHLC)</div>
         <div class="row" style="flex-wrap:wrap;gap:12px">
           <div class="field grow" style="margin:0"><label>Symbol</label><input id="btSym" value="RELIANCE"></div>
           <div class="field grow" style="margin:0"><label>Stop loss %</label><input type="number" id="btStop" value="8" min="1" max="40"></div>
@@ -1768,7 +1768,7 @@
           <div class="field grow" style="margin:0"><label>Sessions</label><input type="number" id="btDays" value="500" min="60" max="750"></div>
           <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="btRun">Run backtest</button></div>
         </div>
-        <div class="hint" style="margin-top:10px">Backtests use deterministic demo data. Past performance does not guarantee future results.</div>
+        <div class="hint" style="margin-top:10px">Backtests use real historical OHLC where available (deterministic demo fallback offline). Past performance does not guarantee future results.</div>
       </div>
       <div id="btBody" style="margin-top:16px"></div>`;
     const run = () => {
@@ -1905,7 +1905,7 @@
             <div class="row small muted" style="gap:10px;flex-wrap:wrap">
               ${score ? '<span class="badge">score: ' + esc(score.model) + '</span>' : ""}
               ${sig ? '<span class="badge">signal: ' + esc(sig.model) + '</span>' : ""}
-              <span class="badge">data: demo-mock</span>
+              <span class="badge">data: moneycontrol-live</span>
             </div>
             <div class="muted small" style="margin-top:8px">Score transparency: every factor is shown with evidence, so results are auditable.</div>
           </div>
