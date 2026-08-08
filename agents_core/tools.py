@@ -310,7 +310,14 @@ def tool_ledger_summary(period: str = "month") -> str:
 
 
 def build_tools(agent: str, extra: list[Tool] | None = None) -> list[Tool]:
-    return COMMON_TOOLS + (extra or [])
+    seen: set[str] = set()
+    out: list[Tool] = []
+    for t in COMMON_TOOLS + (extra or []):
+        if t.name in seen:
+            continue
+        seen.add(t.name)
+        out.append(t)
+    return out
 
 
 def execute_tool(tools: list[Tool], name: str, args: dict[str, Any], agent: str) -> str:

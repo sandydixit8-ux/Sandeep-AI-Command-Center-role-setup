@@ -72,6 +72,8 @@ class Agent:
 
     def _iterate(self):
         max_steps = get_settings().max_tool_steps
+        last_sig: tuple | None = None
+        repeat_errors = 0
         try:
             for _ in range(max_steps):
                 result = self.client.complete(self.history, self._tool_schemas(), self.max_tokens)
@@ -91,6 +93,19 @@ class Agent:
                 for tc in result.tool_calls:
                     output = execute_tool(self.tools, tc.name, tc.arguments, self.name)
                     yield {"type": "tool_call", "name": tc.name, "arguments": tc.arguments, "output": output}
+                    # Guard against the model retrying the exact same broken call forever.
+                    sig = (tc.name, tuple(sorted((tc.arguments or {}).items())))
+                    if output.startswith("error") and sig == last_sig:
+                        repeat_errors += 1
+                    else:
+                        repeat_errors = 0
+                    last_sig = sig
+                    if repeat_errors >= 3:
+                        yield {
+                            "type": "error",
+                            "text": f"tool {tc.name} failed 3 times in a row ({output}); stopping rather than looping.",
+                        }
+                        return
                     self.history.append(
                         {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": output}
                     )

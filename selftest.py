@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents_core.agent import Agent
 from agents_core.registry import get_agent, list_agents
-from agents_core.llm import _parse_failed_generation
+from agents_core.llm import _parse_failed_generation, _parse_tool_arguments, _retry_after
 from agents_core.scoring import score_resume, extract_skills
 from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS, COMMON_TOOLS
 
@@ -180,6 +180,8 @@ def main() -> int:
         ('{"error":{"failed_generation":"<function=ledger_summary={\\"period\\": \\"month\\"}</function>"}}', "ledger_summary"),
         ('{"error":{"failed_generation":"<function=ledger_summary{\\"period\\": \\"month\\"}</function>"}}', "ledger_summary"),
         ('{"error":{"failed_generation":"<function=ledger_add={ \\"amount\\": 5 }>"}}', "ledger_add"),
+        ('{"error":{"failed_generation":"<function=get_time:{}>"}}', "get_time"),
+        ('{"error":{"failed_generation":"<function=gmail_inbox:{\\"query\\": \\"job\\"}>"}}', "gmail_inbox"),
     ]
     for body, expected in cases:
         res = _parse_failed_generation(body)
@@ -187,6 +189,21 @@ def main() -> int:
         check(f"rescue parser handles: {expected}", ok, str(res.tool_calls if res else None))
     res = _parse_failed_generation('{"error":{"message":"boom"}}')
     check("rescue parser returns None when no generation", res is None)
+
+    print("\n== tool-arguments parsing (Groq 'null' args) ==")
+    check("null args become empty dict", _parse_tool_arguments("null") == {})
+    check("empty args become empty dict", _parse_tool_arguments("") == {})
+    check("bad json becomes empty dict", _parse_tool_arguments("not json") == {})
+    check("real args pass through", _parse_tool_arguments('{"period": "month"}') == {"period": "month"})
+    check("retry-after parses Groq body", _retry_after('{"error":{"message":"try again in 8.26s"}}') == 8.26)
+    check("retry-after default", _retry_after("no hint here") == 8.0)
+
+    print("\n== tool dedup ==")
+    cmdr_tools = get_agent("commander")
+    names = [t.name for t in cmdr_tools.tools]
+    check("commander tools deduped", len(names) == len(set(names)), str(names))
+    check("pdf_to_text appears once", names.count("pdf_to_text") == 1, str(names))
+    cmdr_tools.close()
 
     print(f"\n{'-' * 40}\nresult: {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

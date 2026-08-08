@@ -6,6 +6,7 @@ calling Anthropic directly without an SDK.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,17 +103,22 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
         url = self.cfg.openai_base_url.rstrip("/") + "/chat/completions"
-        try:
-            resp = self._http.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self.cfg.openai_api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise LLMError(f"openai request failed: {exc}") from exc
+        headers = {
+            "Authorization": f"Bearer {self.cfg.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = self._http.post(url, json=payload, headers=headers)
+            except httpx.HTTPError as exc:
+                raise LLMError(f"openai request failed: {exc}") from exc
+            if resp.status_code != 429:
+                break
+            if attempt < 2:
+                time.sleep(_retry_after(resp.text))
+        if resp is None:
+            raise LLMError("openai request failed: no response")
         if resp.status_code != 200:
             # Some models (e.g. llama.cpp derivatives on Groq) occasionally emit a tool
             # call in <function=...> text form instead of structured JSON. Groq rejects
@@ -127,11 +133,9 @@ class LLMClient:
         result.text = (message.get("content") or "").strip() or None
         for tc in message.get("tool_calls") or []:
             fn = tc.get("function") or {}
-            try:
-                arguments = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
-            result.tool_calls.append(ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=arguments))
+            result.tool_calls.append(
+                ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=_parse_tool_arguments(fn.get("arguments")))
+            )
         return result
 
     def close(self) -> None:
@@ -241,13 +245,40 @@ def _mock_complete(history: list[dict[str, Any]]) -> ChatResult:
 # ------------------------------------------------------------------ fallback
 
 
+def _retry_after(error_body: str, default: float = 8.0) -> float:
+    """Parse Groq's 'Please try again in 8.26s' from a 429 body; clamp to 60s."""
+    import re
+
+    m = re.search(r"try again in\s+([\d.]+)\s*s", error_body)
+    if m:
+        try:
+            return min(max(float(m.group(1)), 0.5), 60.0)
+        except ValueError:
+            pass
+    return default
+
+
+def _parse_tool_arguments(raw: str | None) -> dict[str, Any]:
+    """Parse a tool-call arguments JSON string into a dict.
+
+    Providers (especially llama-3.x on Groq) sometimes emit `"arguments": "null"`,
+    an empty string, or malformed JSON for tools with no required parameters.
+    All of those must become `{}` so the tool still executes.
+    """
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _parse_failed_generation(error_body: str) -> ChatResult | None:
     """Rescue a tool call that a provider rejected as text.
 
     Some providers return 400 for the llama.cpp-style format
     ``<function=name={"arg": "val"}</function>`` but include the raw generation in the
-    error body. Parse it so the agent loop can execute the tool anyway. Both forms are
-    tolerated: with or without an ``=`` between the function name and the JSON.
+    error body. Parse it so the agent loop can execute the tool anyway. Tolerated
+    separators between the name and JSON: ``=``, ``:``, or nothing.
     """
     try:
         data = json.loads(error_body)
@@ -258,7 +289,7 @@ def _parse_failed_generation(error_body: str) -> ChatResult | None:
         gen = error_body
     import re
 
-    m = re.search(r"<function=(\w+)(?:=\s*)?(\{.*?\}|[^\n<]+)(?:</function>|>|$)", gen, re.S)
+    m = re.search(r"<function=(\w+)(?:[=:]\s*)?(\{.*?\}|[^\n<]+)(?:</function>|>|$)", gen, re.S)
     if not m:
         return None
     args_str = m.group(2).strip()
