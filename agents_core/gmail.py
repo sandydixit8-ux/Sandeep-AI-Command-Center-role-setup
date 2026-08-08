@@ -113,8 +113,8 @@ def _search(conn: imaplib.IMAP4_SSL, query: str, limit: int) -> list[bytes]:
 
 
 def _valid_id(message_id: str) -> bool:
-    """IMAP message ids are plain integers; reject placeholders like '<id>'."""
-    return bool(message_id) and message_id.strip().isdigit()
+    """IMAP message ids are plain integers; reject placeholders like '<id>' or '0'."""
+    return bool(message_id) and message_id.strip().isdigit() and message_id.strip() != "0"
 
 
 def _require_id(message_id: str) -> None:
@@ -157,7 +157,13 @@ def read_thread(message_id: str, limit: int = 10) -> str:
     _require_id(message_id)
     conn = _connect_imap()
     try:
-        status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[])")
+        try:
+            status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[])")
+        except imaplib.IMAP4.error as exc:
+            raise ToolError(
+                f"message not found or invalid id: {message_id!r} ({exc}). "
+                "Use a numeric id from gmail_inbox output."
+            ) from exc
         if status != "OK" or not data:
             return f"message not found: {message_id}"
         raw = data[0][1] if isinstance(data[0], tuple) else None
@@ -183,7 +189,13 @@ def draft_reply(message_id: str, reply_body: str) -> str:
     _require_id(message_id)
     conn = _connect_imap()
     try:
-        status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[HEADER])")
+        try:
+            status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[HEADER])")
+        except imaplib.IMAP4.error as exc:
+            raise ToolError(
+                f"message not found or invalid id: {message_id!r} ({exc}). "
+                "Use a numeric id from gmail_inbox output."
+            ) from exc
         if status != "OK" or not data:
             return f"message not found: {message_id}"
         raw = data[0][1] if isinstance(data[0], tuple) else None

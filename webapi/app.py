@@ -24,7 +24,7 @@ from agents_core.prompts import AGENTS
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="Sandeep AI Command Center", version="0.3.0")
+app = FastAPI(title="Sandeep AI Command Center", version="0.4.0")
 
 
 class RunRequest(BaseModel):
