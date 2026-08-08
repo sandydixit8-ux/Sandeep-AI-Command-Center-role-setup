@@ -88,6 +88,14 @@ def main() -> int:
     r7 = execute_tool(build_tools("exec"), "write_file", {"path": "../../evil.md", "content": "x"}, "exec")
     check("path traversal blocked", "error" in r7, r7)
 
+    data_dir = Path(os.environ["AGENT_DATA_DIR"])
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "jd.txt").write_text("Need Python, FastAPI, Docker, kubernetes.", encoding="utf-8")
+    r8 = execute_tool(build_tools("docs"), "read_file", {"path": "data/jd.txt"}, "docs")
+    check("read_file resolves data/ prefix", r8 == "Need Python, FastAPI, Docker, kubernetes.", r8)
+    r9 = execute_tool(JOBSEARCH_TOOLS, "skill_match", {"resume": "data/jd.txt", "jd": "Python developer with Docker and kubernetes."}, "jobsearch")
+    check("skill_match reads data/ file", "skill match:" in r9 and "python" in r9, r9[:80])
+
     print("\n== skill-match scoring ==")
     resume = "Experienced Python developer. 5 years writing REST APIs with FastAPI, Docker, AWS, git. Project management with agile and jira."
     jd = "Looking for a Python + FastAPI engineer. Must know Docker, AWS, git, CI/CD, Kubernetes. Project management with scrum is a plus."
@@ -189,6 +197,13 @@ def main() -> int:
         check(f"rescue parser handles: {expected}", ok, str(res.tool_calls if res else None))
     res = _parse_failed_generation('{"error":{"message":"boom"}}')
     check("rescue parser returns None when no generation", res is None)
+    res = _parse_failed_generation(
+        '{"error":{"message":"tool call validation failed: attempted to call tool \'skills_in[]{\\"text\\": \\"CERTIFICATIONS\\\\nbullets {here}\\"}</function>"}}'
+    )
+    check("rescue parses []-suffix from message field", res is not None and res.tool_calls[0].name == "skills_in", str(res.tool_calls if res else None))
+    check("rescue preserves brace inside string", res is not None and res.tool_calls[0].arguments.get("text") == "CERTIFICATIONS\nbullets {here}", str(res.tool_calls if res else None))
+    res = _parse_failed_generation("some plain text with <function=notes_add:{\"text\": \"x\"}> no json")
+    check("rescue parses from raw body", res is not None and res.tool_calls[0].name == "notes_add", str(res.tool_calls if res else None))
 
     print("\n== tool-arguments parsing (Groq 'null' args) ==")
     check("null args become empty dict", _parse_tool_arguments("null") == {})

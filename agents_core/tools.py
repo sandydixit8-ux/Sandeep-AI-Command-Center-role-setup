@@ -41,19 +41,30 @@ def _safe_path(target: str, allowed_root: Path) -> Path:
     return p
 
 
-def _resolve_read_path(path: str) -> Path:
-    """Resolve a file path for reading: try the outputs dir first, then the project root.
+def _strip_root_prefix(path: str, root: Path) -> Path:
+    """Drop a leading 'outputs'/'data' prefix so paths work against the matching root."""
+    p = Path(path).expanduser()
+    parts = list(p.parts)
+    if parts and parts[0].lower() == root.name.lower():
+        p = Path(*parts[1:])
+    return p
 
-    This lets agents read both files they generate (outputs/...) and source files
-    in the workspace (e.g. ResumeIQ/...).
+
+def _resolve_read_path(path: str) -> Path:
+    """Resolve a file path for reading: try outputs, then data, then the project root.
+
+    This lets agents read both files they generate (outputs/...), reference data
+    (data/...), and source files in the workspace (e.g. ResumeIQ/...). A leading
+    'outputs'/'data' prefix is tolerated.
     """
     p = Path(path).expanduser()
     if p.is_absolute():
         _safe_path(str(p), OUTPUTS_DIR)
+        _safe_path(str(p), DATA_DIR)
         _safe_path(str(p), BASE_DIR.parent)
         return p.resolve()
-    for root in (OUTPUTS_DIR, BASE_DIR.parent):
-        candidate = root / p
+    for root in (OUTPUTS_DIR, DATA_DIR, BASE_DIR.parent):
+        candidate = root / _strip_root_prefix(path, root)
         if candidate.is_file():
             return candidate
     return (BASE_DIR.parent / p).resolve()
@@ -345,8 +356,8 @@ def _read_tool_input(value: str) -> str:
     """
     if len(value) > 500:
         return value
-    for root in (BASE_DIR.parent, OUTPUTS_DIR):
-        candidate = root / value
+    for root in (BASE_DIR.parent, DATA_DIR, OUTPUTS_DIR):
+        candidate = root / _strip_root_prefix(value, root)
         if candidate.is_file() and candidate.stat().st_size <= 200_000:
             if candidate.suffix.lower() == ".pdf":
                 from .pdfutil import pdf_to_text

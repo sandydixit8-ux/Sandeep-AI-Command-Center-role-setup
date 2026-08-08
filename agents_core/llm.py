@@ -272,31 +272,97 @@ def _parse_tool_arguments(raw: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _scan_json_object(text: str, start: int = 0) -> tuple[dict[str, Any], int] | None:
+    """Extract a single JSON object starting at the first '{' at/after `start`.
+
+    Brace-aware: quoted strings and escapes are respected, so braces inside string
+    values don't confuse the scan. Returns (parsed dict, index after the object)
+    or None if no valid object can be parsed.
+    """
+    i = text.find("{", start)
+    if i < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for j in range(i, len(text)):
+        ch = text[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(text[i : j + 1])
+                except json.JSONDecodeError:
+                    return None
+                return (obj, j + 1) if isinstance(obj, dict) else None
+    return None
+
+
+def _parse_generation_tool(gen: str) -> tuple[str, dict[str, Any]] | None:
+    """Parse a tool call emitted in text form into (name, args).
+
+    Handles the observed variants:
+      <function=get_time:{}>
+      <function=ledger_summary={"period":"month"}</function>
+      <function=skills_in[]{"text": "..."}</function>
+      skills_in[]{"text": "..."}      (bare, as Groq embeds in 'tool call
+                                       validation failed' error messages)
+    i.e. an optional ``[]`` and optional ``=``/``:`` separator before the JSON object.
+    """
+    import re
+
+    m = re.search(r"<function=(\w+)", gen)
+    if m:
+        name = m.group(1)
+        rest = gen[m.end() :]
+    else:
+        m = re.search(r"\b(\w+)(?:\[\])?\s*[=:]?\s*\{", gen)
+        if not m:
+            return None
+        name = m.group(1)
+        rest = gen[m.end() - 1 :]
+    rest = rest.lstrip()
+    if rest.startswith("[]"):
+        rest = rest[2:].lstrip()
+    if rest[:1] in ("=", ":"):
+        rest = rest[1:].lstrip()
+    if not rest.startswith("{"):
+        return None
+    parsed = _scan_json_object(rest)
+    if parsed is None:
+        return None
+    return (name, parsed[0])
+
+
 def _parse_failed_generation(error_body: str) -> ChatResult | None:
     """Rescue a tool call that a provider rejected as text.
 
-    Some providers return 400 for the llama.cpp-style format
-    ``<function=name={"arg": "val"}</function>`` but include the raw generation in the
-    error body. Parse it so the agent loop can execute the tool anyway. Tolerated
-    separators between the name and JSON: ``=``, ``:``, or nothing.
+    Some providers (llama.cpp derivatives on Groq) return 400 for a text-form
+    ``<function=name={...}>`` call but include the raw generation in the error body,
+    either in ``failed_generation`` or inline in ``message``. Parse it so the agent
+    loop can execute the tool anyway.
     """
+    gen = ""
     try:
         data = json.loads(error_body)
-        gen = (data.get("error") or {}).get("failed_generation") or ""
-        if not gen:
-            return None
+        err = data.get("error") or {}
+        gen = (err.get("failed_generation") or err.get("message") or "") if isinstance(err, dict) else ""
     except (json.JSONDecodeError, AttributeError):
         gen = error_body
-    import re
-
-    m = re.search(r"<function=(\w+)(?:[=:]\s*)?(\{.*?\}|[^\n<]+)(?:</function>|>|$)", gen, re.S)
-    if not m:
+    parsed = _parse_generation_tool(gen) or _parse_generation_tool(error_body)
+    if parsed is None:
         return None
-    args_str = m.group(2).strip()
-    try:
-        arguments = json.loads(args_str)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(arguments, dict):
-        return None
-    return ChatResult(tool_calls=[ToolCall(id="rescued_tool_call", name=m.group(1), arguments=arguments)])
+    name, arguments = parsed
+    return ChatResult(tool_calls=[ToolCall(id="rescued_tool_call", name=name, arguments=arguments)])
