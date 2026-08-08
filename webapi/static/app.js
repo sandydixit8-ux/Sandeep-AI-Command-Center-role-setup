@@ -1382,7 +1382,7 @@
     screener: "Filter the universe by score, sector, valuation and momentum.",
     watchlist: "Your saved symbols, refreshed with live Moneycontrol quotes (demo fallback offline).",
     signals: "Composite signals across the whole universe, never a single indicator.",
-    options: "NSE India option chains: OI, PCR, IV, max pain, expected move, unusual activity, scenarios, strategies and paper trading.",
+    options: "NSE India option chains: OI, PCR, IV, max pain, expected move, unusual activity, scenarios, strategies, paper trading and the Option Intel decision card (futures, IV rank, no-trade gate).",
     portfolio: "Simulated paper portfolio value, exposure and P&L.",
     paper: "Execute simulated buys and sells — no real money, ever.",
     backtest: "EMA+RSI strategy backtest on real historical OHLC with anti-overfit grading.",
@@ -1695,6 +1695,7 @@
     ["move", "🎯", "Max Pain / Move"],
     ["unusual", "⚡", "Unusual Activity"],
     ["strategy", "🧪", "Strategy Lab"],
+    ["intel", "🧠", "Intel"],
     ["paper", "📝", "Option Paper"],
     ["backtest", "⏱️", "Option Backtest"],
   ];
@@ -1737,6 +1738,7 @@
       <div id="optBody" style="margin-top:16px"></div>`;
     const expirySel = $("#optExpiry");
     const optState = { underlying: "NIFTY", expiry: "", analysis: null };
+    window.__optIntelState = optState;
 
     const loadExpiries = () => {
       window.OptionsClient.expiries(optState.underlying).then(list => {
@@ -1750,7 +1752,7 @@
       const active = (t && t.dataset.t) || "overview";
       const a = optState.analysis;
       if (!a) { $("#optBody").innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">🧾</div><h3>No data yet</h3><p>Select an expiry and press "Load chain".</p></div>'; return; }
-      const subs = { overview: optOverview, chain: optChain, oi: optOI, iv: optIV, move: optMove, unusual: optUnusual, strategy: optStrategy, paper: optPaper, backtest: optBacktest };
+      const subs = { overview: optOverview, chain: optChain, oi: optOI, iv: optIV, move: optMove, unusual: optUnusual, strategy: optStrategy, intel: optIntel, paper: optPaper, backtest: optBacktest };
       (subs[active] || optOverview)($("#optBody"), a);
     };
 
@@ -1982,7 +1984,83 @@
           </div>
           <div class="muted small" style="margin-top:6px">X = underlying price · Y = P&L per lot (₹).</div>
         </div>`;
-    }));
+      }));
+  }
+
+  /* ---------------- Option Intelligence layer ---------------- */
+  function optIntel(body) {
+    const holder = document.createElement("div");
+    holder.innerHTML = mktLoading();
+    body.appendChild(holder);
+    const state = window.__optIntelState || { underlying: "NIFTY", expiry: "" };
+    const q = window.OptionsClient.qs({ underlying: state.underlying, expiry: state.expiry, record: "true" });
+    const url = "/api/v1/options/intel" + q;
+
+    const iqBadge = (q) => q && q.grade ? '<span class="badge ' + (q.grade === "HIGH" ? "ok" : q.grade === "MEDIUM" ? "wait" : "err") + '">Liq ' + q.grade + ' · ' + q.score + '/100</span>' : "";
+    const ivrBadge = (v) => {
+      if (!v || v.error) return '<span class="badge wait">IV rank —</span>';
+      const r = v.iv_rank;
+      return '<span class="badge ' + (r > 70 ? "err" : r > 40 ? "wait" : "ok") + '">IV rank ' + r + '%</span>';
+    };
+    const crushBadge = (c) => c && c.crush_detected
+      ? '<span class="badge err">IV CRUSH ' + c.iv_change_pct + '%</span>'
+      : c && c.iv_change_pct !== undefined
+        ? '<span class="badge ok">IV ' + (c.iv_change_pct >= 0 ? "+" : "") + c.iv_change_pct + '% Δ</span>'
+        : '<span class="badge wait">Crush —</span>';
+
+    fetch(url).then(r => r.ok ? r.json() : Promise.reject(new Error("intel " + r.status))).then(d => {
+      holder.innerHTML = `
+        <div class="mkt-banner">
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
+            <span class="avatar ai lg" style="font-size:20px">🧠</span>
+            <div class="grow"><b style="font-size:17px">Decision Intel · ${esc(d.meta.underlying)}</b>
+            <div class="muted small">${esc(d.meta.expiry)} · ${esc(d.meta.market_state)} · ${esc(d.meta.timestamp)}</div></div>
+            <span class="badge ${(d.no_trade && d.no_trade.tradeable) ? "ok" : "err"}">${(d.no_trade && d.no_trade.decision) || "—"}</span>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:12px">
+          <div class="card"><div class="card-title">Futures (ESTIMATED model)</div>
+            <div class="spread"><span class="muted">Future</span><b>${fmtNum(d.futures.future, 2)}</b></div>
+            <div class="spread"><span class="muted">Basis</span><span>${fmtNum(d.futures.basis_points, 2)} pts (${d.futures.basis_pct}%)</span></div>
+            <div class="spread"><span class="muted">Carry / DTE</span><span>${d.futures.carry_rate}% · ${d.futures.dte}d</span></div>
+            <div class="hint" style="margin-top:8px">Labelled ESTIMATED — cost-of-carry, not a broker quote.</div>
+          </div>
+          <div class="card"><div class="card-title">Volatility</div>
+            <div class="row" style="flex-wrap:wrap;gap:8px">
+              ${ivrBadge(d.vol_stats && d.vol_stats.rank)}
+              ${crushBadge(d.vol_stats && d.vol_stats.crush)}
+              <span class="badge">Skew ${(d.vol_stats && d.vol_stats.skew && d.vol_stats.skew.skew) || "—"}</span>
+              <span class="badge">Smile ${(d.vol_stats && d.vol_stats.smile && d.vol_stats.smile.smile) || "—"}</span>
+            </div>
+            <div class="muted small" style="margin-top:8px">Rank from recorded snapshots; more history = more meaningful.</div>
+          </div>
+          <div class="card"><div class="card-title">Liquidity / Execution</div>
+            ${iqBadge(d.liquidity && d.liquidity.atm)}
+            <div class="spread" style="margin-top:8px"><span class="muted">Spread</span><span>${fmtNum(d.liquidity.atm.spread, 2)} (${fmtNum(d.liquidity.atm.spread_pct, 2)}%)</span></div>
+            <div class="spread"><span class="muted">Depth / Vol</span><span>${fmtNum(d.liquidity.atm.depth, 0)} / ${fmtNum(d.liquidity.atm.volume, 0)}</span></div>
+          </div>
+          <div class="card"><div class="card-title">Velocity (snapshot window)</div>
+            <div class="spread"><span class="muted">ATM IV Δ/hr</span><b class="${(d.velocity.atm_iv_change || 0) < 0 ? "down" : "up"}">${d.velocity.atm_iv_change === null ? "—" : fmtNum(d.velocity.atm_iv_change, 4)}</b></div>
+            <div class="spread"><span class="muted">CE / PE OI Δ/hr</span><span>${fmtNum(d.velocity.ce_oi_change, 0)} / ${fmtNum(d.velocity.pe_oi_change, 0)}</span></div>
+            <div class="spread"><span class="muted">Spot Δ/hr</span><span>${fmtNum(d.velocity.spot_change, 2)}</span></div>
+            <div class="hint" style="margin-top:8px">Points: ${d.velocity.points} snapshot(s) in window.</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:12px"><div class="card-title">Decision Card</div>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <span class="badge">Trade quality ${d.trade_quality ? (d.trade_quality.score + "/100 · " + d.trade_quality.grade) : "—"}</span>
+            <span class="badge">Breadth ${d.breadth && d.breadth.regime_read}</span>
+            ${(d.events || []).map(e => '<span class="badge wait">' + esc(e.name) + (e.typical_iv_impact ? " ±" + (e.typical_iv_impact * 100).toFixed(0) + "% IV" : "") + '</span>').join("")}
+          </div>
+          ${d.no_trade && d.no_trade.reasons && d.no_trade.reasons.length
+            ? '<div class="alert" style="margin-top:10px"><b>NO TRADE</b> — ' + d.no_trade.message + '<ul>' + d.no_trade.reasons.map(r => '<li>' + esc(r.reason) + ' · ' + esc(r.detail) + '</li>').join("") + '</ul></div>'
+            : '<div class="hint" style="margin-top:10px">' + esc((d.no_trade && d.no_trade.narrative) || "No explicit blocker.") + '</div>'}
+        </div>
+        <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:8px">
+          <span class="muted small" style="font-size:12px">${esc(d.monitoring.failover.note || "")}</span>
+          <span class="badge ${d.breadth && d.breadth.indices_breadth >= 0.5 ? "ok" : ""}">Indices breadth ${d.breadth ? d.breadth.indices_breadth : 0}</span>
+        </div>`;
+    }).catch(e => { holder.innerHTML = mktError(e); });
   }
 
   function optPaper(body, a) {

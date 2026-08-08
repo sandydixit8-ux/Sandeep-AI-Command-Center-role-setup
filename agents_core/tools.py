@@ -635,6 +635,56 @@ def tool_option_backtest(strategy: str = "iron_condor", notional: float = 100000
         strategy, notional, hold_days, premium_pct))
 
 
+def _intel_module():
+    from . import options_intel as oi
+
+    return oi
+
+
+def tool_option_intel(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    return _jsonish(_intel_module().intelligence_report(underlying, expiry, record=True))
+
+
+def tool_option_futures(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    meta = a["meta"]
+    f = _intel_module().FuturesAnalytics(meta["underlying"], meta["expiry"], meta["spot"])
+    return _jsonish(f.future_with_basis())
+
+
+def tool_option_expiry(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    meta = a["meta"]
+    next_exp = meta["expiries"][1] if len(meta["expiries"]) > 1 else None
+    return _jsonish(_intel_module().ExpiryAnalytics(
+        meta["underlying"], meta["expiry"], next_exp).compare())
+
+
+def tool_option_iv_stats(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    return _jsonish(_intel_module().VolStats(underlying, a).all())
+
+
+def tool_option_velocity(underlying: str = "NIFTY", minutes: int = 120) -> str:
+    return _jsonish(_intel_module().SnapshotHistoryStore().velocity(underlying, minutes))
+
+
+def tool_option_no_trade(underlying: str = "NIFTY", expiry: str | None = None) -> str:
+    a = _options_module().analyze_chain(underlying, expiry)
+    strategy = a["strategies"][0] if a.get("strategies") else None
+    liq = _intel_module().LiquidityExecution(a["contracts"], a["meta"]["spot"]).quote_quality()
+    return _jsonish(_intel_module().NoTradeEngine().decide(
+        a, strategy, liquidity_grade=liq.get("grade", "LOW"), data_ok=True))
+
+
+def tool_option_signal_performance(strategy: str = "all") -> str:
+    return _jsonish(_intel_module().SignalsPerformance().stats())
+
+
+def tool_option_events() -> str:
+    return _jsonish(_intel_module().EventCalendar().upcoming())
+
+
 MARKET_TOOLS: list[Tool] = [
     Tool("market_indices", "List tracked market indices (NIFTY 50, SENSEX, etc.) with change and status.", tool_market_indices, {"type": "object", "properties": {}}),
     Tool("market_quote", "Get a stock quote (price, change, market cap, valuation) by symbol.", tool_market_quote, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
@@ -667,6 +717,14 @@ OPTION_TOOLS: list[Tool] = [
     Tool("option_paper_open", "Open a PAPER option position (no real money) at a given entry price.", tool_option_paper_open, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}, "strike": {"type": "number"}, "option_type": {"type": "string", "enum": ["CE", "PE"]}, "action": {"type": "string", "enum": ["BUY", "SELL"]}, "quantity": {"type": "integer"}, "entry_price": {"type": "number"}}, "required": ["underlying", "expiry", "strike", "option_type", "action", "quantity", "entry_price"]}),
     Tool("option_paper_positions", "List open/closed paper option positions with P&L.", tool_option_paper_positions, {"type": "object", "properties": {}}),
     Tool("option_backtest", "Run a simulated options strategy backtest with costs and slippage (approximate, not real results).", tool_option_backtest, {"type": "object", "properties": {"strategy": {"type": "string"}, "notional": {"type": "number"}, "hold_days": {"type": "integer"}, "premium_pct": {"type": "number"}}}),
+    Tool("option_intel", "Full option-intelligence report: futures (ESTIMATED), expiry/rollover, OI velocity, IV rank/crush/skew, liquidity, trade quality, NO-TRADE decision card, breadth, events, failover.", tool_option_intel, {"type": "object", "properties": {"underlying": {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]}, "expiry": {"type": "string"}}}),
+    Tool("option_futures", "Estimated futures value and basis from cost-of-carry (labelled ESTIMATED; NSE has no reachable futures feed).", tool_option_futures, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_expiry", "Near-v-next expiry comparison: PCR, IV, DTE, max pain, term shape.", tool_option_expiry, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_iv_stats", "IV rank/percentile from recorded history, crush detection, put-call skew, smile shape.", tool_option_iv_stats, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_velocity", "Snapshot-window velocity: per-hour change in ATM IV, OI, spot, PCR between oldest/newest.", tool_option_velocity, {"type": "object", "properties": {"underlying": {"type": "string"}, "minutes": {"type": "integer"}}}),
+    Tool("option_no_trade", "Explicit NO-TRADE decision with auditable reasons; staying flat is a valid outcome.", tool_option_no_trade, {"type": "object", "properties": {"underlying": {"type": "string"}, "expiry": {"type": "string"}}}),
+    Tool("option_signal_performance", "Closed-signal performance: win rate, expectancy, drawdown, kill/observation verdict.", tool_option_signal_performance, {"type": "object", "properties": {"strategy": {"type": "string"}}}),
+    Tool("option_events", "Upcoming macro/earnings events with typical IV-impact so expiry/IV risk can be gated.", tool_option_events, {"type": "object", "properties": {}}),
 ]
 
 RISK_TOOLS: list[Tool] = [

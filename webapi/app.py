@@ -24,6 +24,7 @@ from agents_core.registry import get_agent
 from agents_core.prompts import AGENTS
 from agents_core import market
 from agents_core import options as options_mod
+from agents_core import options_intel as intel_mod
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -337,6 +338,62 @@ def options_backtest(strategy: str = "iron_condor", notional: float = 100000.0,
 @app.get("/api/v1/options/backtest/history")
 def options_backtest_history() -> list[dict]:
     return options_mod.OptionsBacktest().history()
+
+
+# --------------------------------------------------------------------------- option intelligence layer
+
+
+@app.get("/api/v1/options/intel")
+def options_intel(underlying: str = "NIFTY", expiry: str | None = None, record: bool = True) -> dict:
+    try:
+        return intel_mod.intelligence_report(_valid_underlying(underlying), expiry, record=record)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"option-intel failed: {exc}") from exc
+
+
+@app.get("/api/v1/options/futures")
+def options_intel_futures(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    a = _analyze(underlying, expiry)
+    m = a["meta"]
+    return intel_mod.FuturesAnalytics(m["underlying"], m["expiry"], m["spot"]).future_with_basis()
+
+
+@app.get("/api/v1/options/expiry")
+def options_intel_expiry(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    a = _analyze(underlying, expiry)
+    m = a["meta"]
+    nxt = m["expiries"][1] if len(m["expiries"]) > 1 else None
+    return intel_mod.ExpiryAnalytics(m["underlying"], m["expiry"], nxt).compare()
+
+
+@app.get("/api/v1/options/vol")
+def options_intel_vol(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    a = _analyze(underlying, expiry)
+    return intel_mod.VolStats(_valid_underlying(underlying), a).all()
+
+
+@app.get("/api/v1/options/velocity")
+def options_intel_velocity(underlying: str = "NIFTY", minutes: int = 120) -> dict:
+    return intel_mod.SnapshotHistoryStore().velocity(_valid_underlying(underlying), minutes)
+
+
+@app.get("/api/v1/options/no-trade")
+def options_intel_no_trade(underlying: str = "NIFTY", expiry: str | None = None) -> dict:
+    a = _analyze(underlying, expiry)
+    strategy = a["strategies"][0] if a.get("strategies") else None
+    liq = intel_mod.LiquidityExecution(a["contracts"], a["meta"]["spot"]).quote_quality()
+    return intel_mod.NoTradeEngine().decide(
+        a, strategy, liquidity_grade=liq.get("grade", "LOW"), data_ok=True)
+
+
+@app.get("/api/v1/options/signal-performance")
+def options_intel_signal_performance() -> dict:
+    return intel_mod.SignalsPerformance().stats()
+
+
+@app.get("/api/v1/options/events")
+def options_intel_events() -> list[dict]:
+    return intel_mod.EventCalendar().upcoming()
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

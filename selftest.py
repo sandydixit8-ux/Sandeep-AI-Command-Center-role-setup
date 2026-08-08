@@ -38,6 +38,7 @@ from agents_core.tools import (
 )
 from agents_core import market as mkt
 from agents_core import options as opt
+from agents_core import options_intel as intel
 
 PASS = 0
 FAIL = 0
@@ -454,6 +455,26 @@ def main() -> int:
     check("option_signal tool works", '"score"' in rsig, rsig[:80])
     rerr = execute_tool(OPTION_TOOLS, "option_chain", {"underlying": "BOGUS"}, "market")
     check("option_chain errors on bad underlying", "error" in rerr, rerr[:80])
+
+    print("\n== option chain engine: intelligence layer ==")
+    store = intel.SnapshotHistoryStore()
+    a = opt.analyze_chain("NIFTY", store=False)
+    meta = a["meta"]
+    fut = intel.FuturesAnalytics(meta["underlying"], meta["expiry"], meta["spot"]).future_with_basis()
+    check("futures labelled ESTIMATED", fut["labeled"] == "ESTIMATED" and fut["future"] > 0, str(fut["future"]))
+    check("futures basis sane", abs(fut["basis_pct"]) < 1.0, str(fut["basis_pct"]))
+    vols = intel.VolStats("NIFTY", a).all()
+    check("vol has skew", vols["skew"]["skew"] in ("RISK", "CALL_BIAS", "NEUTRAL", "INSUFFICIENT_DATA"))
+    liq = intel.LiquidityExecution(a["contracts"], meta["spot"]).quote_quality()
+    check("liquidity grade", liq["grade"] in ("HIGH", "MEDIUM", "LOW"))
+    probs = intel.ProbabilityEngine(meta["spot"], meta["expiry"], 0.15).strategy_expectancy(100, 100, [meta["spot"] * 0.99, meta["spot"] * 1.01])
+    check("probability engine returns ev", "ev" in probs)
+    nt = intel.NoTradeEngine().decide(a, a["strategies"][0] if a.get("strategies") else None, data_ok=True)
+    check("no-trade decision is explicit", nt["decision"] in ("NO TRADE", "WATCH / VALIDATED"))
+    intel_sig = intel.SignalLifecycle().create("NIFTY", "calc", {"tradeable": True})
+    check("signal lifecycle persists", intel_sig["stage"] == "GENERATED" and intel_sig["id"].startswith("SL"))
+    rintel = execute_tool(OPTION_TOOLS, "option_no_trade", {"underlying": "NIFTY"}, "market")
+    check("option_no_trade tool works", '"decision"' in rintel, rintel[:80])
 
     print(f"\n{'-' * 40}\nresult: {PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0

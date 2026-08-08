@@ -52,6 +52,14 @@ window.OptionsClient = (() => {
     paperOpen: (p) => post("/options/paper/open" + qs(p)),
     backtest: (p) => get("/options/backtest" + qs(p)),
     backtestHistory: () => get("/options/backtest/history"),
+    intel: (underlying, expiry, record) => get("/options/intel" + qs({ underlying, expiry, record })),
+    futures: (underlying, expiry) => get("/options/futures" + qs({ underlying, expiry })),
+    expiryCompare: (underlying, expiry) => get("/options/expiry" + qs({ underlying, expiry })),
+    vol: (underlying, expiry) => get("/options/vol" + qs({ underlying, expiry })),
+    velocity: (underlying, minutes) => get("/options/velocity" + qs({ underlying, minutes })),
+    noTrade: (underlying, expiry) => get("/options/no-trade" + qs({ underlying, expiry })),
+    signalPerformance: () => get("/options/signal-performance"),
+    events: () => get("/options/events"),
     qs,
   };
 })();
