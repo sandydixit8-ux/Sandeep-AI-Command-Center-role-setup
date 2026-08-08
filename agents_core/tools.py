@@ -331,14 +331,29 @@ def execute_tool(tools: list[Tool], name: str, args: dict[str, Any], agent: str)
 
 
 def _read_tool_input(value: str) -> str:
-    """If `value` points at an existing file, read it; otherwise treat it as text."""
+    """If `value` points at an existing file, read it; otherwise treat it as text.
+
+    PDF paths are transparently converted to text via pypdf so agents can score PDF
+    resumes/JDs directly.
+    """
     if len(value) > 500:
         return value
     for root in (BASE_DIR.parent, OUTPUTS_DIR):
         candidate = root / value
         if candidate.is_file() and candidate.stat().st_size <= 200_000:
+            if candidate.suffix.lower() == ".pdf":
+                from .pdfutil import pdf_to_text
+
+                return pdf_to_text(candidate)
             return candidate.read_text(encoding="utf-8", errors="replace")
     return value
+
+
+def tool_pdf_to_text(path: str) -> str:
+    """Extract text from a PDF file (path relative to the workspace root)."""
+    from .pdfutil import pdf_to_text
+
+    return pdf_to_text(_resolve_read_path(path))
 
 
 def tool_skill_match(resume: str, jd: str) -> str:
@@ -404,6 +419,7 @@ COMMON_TOOLS: list[Tool] = [
     Tool("get_time", "Get the current date and time.", tool_get_time, {"type": "object", "properties": {}}),
     Tool("list_files", "List files in a directory (relative to the project root).", tool_list_files, {"type": "object", "properties": {"dirpath": {"type": "string", "description": "directory path"}}}),
     Tool("read_file", "Read a text file relative to the project root.", tool_read_file, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+    Tool("pdf_to_text", "Extract text from a PDF file.", tool_pdf_to_text, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
     Tool("write_file", "Write a text file under the outputs/ directory.", tool_write_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
     Tool("append_file", "Append text to file under the outputs/ directory.", tool_append_file, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}),
     Tool("web_search", "Search the web for current information.", tool_web_search, {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}),
@@ -419,8 +435,9 @@ FINANCE_TOOLS: list[Tool] = [
 ]
 
 JOBSEARCH_TOOLS: list[Tool] = [
-    Tool("skill_match", "Score a resume against a job description. Each argument may be a file path or raw text.", tool_skill_match, {"type": "object", "properties": {"resume": {"type": "string"}, "jd": {"type": "string"}}, "required": ["resume", "jd"]}),
+    Tool("skill_match", "Score a resume against a job description. Each argument may be a file path (including PDF) or raw text.", tool_skill_match, {"type": "object", "properties": {"resume": {"type": "string"}, "jd": {"type": "string"}}, "required": ["resume", "jd"]}),
     Tool("skills_in", "List known skill keywords detected in a text or file.", tool_skills_in, {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
+    Tool("pdf_to_text", "Extract text from a PDF file.", tool_pdf_to_text, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
 ]
 
 GMAIL_TOOLS: list[Tool] = [

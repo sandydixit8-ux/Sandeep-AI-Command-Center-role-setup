@@ -39,11 +39,29 @@ class Agent:
     def run(self, task: str) -> str:
         """Run one task (fresh user turn). Returns the final assistant text."""
         self.history.append({"role": "user", "content": task})
-        return self._loop()
+        result = ""
+        for event in self._iterate():
+            if event["type"] == "result":
+                result = event["text"]
+            elif event["type"] == "error":
+                result = event["text"]
+        return result or "(no response)"
 
     def chat(self, task: str) -> str:
         """Conversational turn that keeps history (for REPL use)."""
         return self.run(task)
+
+    def run_stream(self, task: str):
+        """Run one task and yield events for progress + a final result.
+
+        Yields dicts:
+          {"type": "assistant", "text": ...}   partial assistant text before a tool call
+          {"type": "tool_call", "name": ..., "arguments": ..., "output": ...}
+          {"type": "result", "text": ...}      final answer
+          {"type": "error", "text": ...}       on failure / step cap
+        """
+        self.history.append({"role": "user", "content": task})
+        yield from self._iterate()
 
     # ------------------------------------------------------------------ internals
 
@@ -52,14 +70,17 @@ class Agent:
             return [t.anthropic_schema() for t in self.tools]
         return [t.openai_schema() for t in self.tools]
 
-    def _loop(self) -> str:
+    def _iterate(self):
         max_steps = get_settings().max_tool_steps
         try:
             for _ in range(max_steps):
                 result = self.client.complete(self.history, self._tool_schemas(), self.max_tokens)
                 if not result.wants_tools:
                     self.history.append({"role": "assistant", "content": result.text or ""})
-                    return result.text or "(no response)"
+                    yield {"type": "result", "text": result.text or "(no response)"}
+                    return
+                if result.text:
+                    yield {"type": "assistant", "text": result.text}
                 self.history.append(
                     {
                         "role": "assistant",
@@ -69,16 +90,17 @@ class Agent:
                 )
                 for tc in result.tool_calls:
                     output = execute_tool(self.tools, tc.name, tc.arguments, self.name)
+                    yield {"type": "tool_call", "name": tc.name, "arguments": tc.arguments, "output": output}
                     self.history.append(
                         {"role": "tool", "tool_call_id": tc.id, "name": tc.name, "content": output}
                     )
-            return "(reached the maximum tool steps — task may be incomplete)"
+            yield {"type": "error", "text": "(reached the maximum tool steps — task may be incomplete)"}
         except LLMError as exc:
             self.history.append({"role": "assistant", "content": f"[error: {exc}]"})
-            return f"error: {exc}"
+            yield {"type": "error", "text": f"error: {exc}"}
         except Exception as exc:  # noqa: BLE001
             self.history.append({"role": "assistant", "content": f"[unexpected error: {exc}]"})
-            return f"unexpected error: {exc}"
+            yield {"type": "error", "text": f"unexpected error: {exc}"}
 
     def reset(self) -> None:
         self.history = [{"role": "system", "content": self.system_prompt}]

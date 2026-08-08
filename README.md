@@ -79,7 +79,11 @@ text — it never fabricates fit. `skills_in` extracts known skill keywords from
 ```bash
 uvicorn webapi.app:app --reload      # run from the Agents/ directory
 ```
-Endpoints: `GET /health`, `GET /api/v1/agents`, `POST /api/v1/run` (`{agent, task}`).
+Open `http://localhost:8000/` for the built-in chat UI (pick an agent, type a task,
+watch tool calls stream in via SSE, Ctrl+Enter to submit).
+Endpoints: `GET /` (chat UI), `GET /health`, `GET /api/v1/agents`,
+`POST /api/v1/run` (`{agent, task}`), `POST /api/v1/run/stream` (SSE events:
+`meta`, `assistant`, `tool_call`, `result`, `error`).
 `commander` is available like any other agent here. Deploy on Render with the included
 `render.yaml` (Blueprint → select this repo).
 
@@ -96,16 +100,18 @@ Agents/
   selftest.py           offline tests (no API key)
   render.yaml           Render blueprint for the web API
   webapi/
-    app.py              FastAPI app (health, agents list, run)
+    app.py              FastAPI app (health, agents list, run, SSE stream, chat UI)
+    static/             chat UI (index.html)
   agents_core/
     config.py           env config
     llm.py              Anthropic + OpenAI-compatible clients + tool-loop primitives
     tools.py            tool registry + built-in tools (file, search, memory, ledger)
     agent.py            BaseAgent: history, tool-calling loop, error handling
     scoring.py          honest resume-vs-JD skill-match scoring
+    pdfutil.py          PDF → text extraction (pypdf)
     gmail.py            Gmail IMAP/SMTP (stdlib only)
     sheets.py           Google Sheets ledger sync (optional dependency)
-    prompts.py          system prompts for all 7 agents
+    prompts.py          system prompts for all 8 agents
     registry.py         agent factory + registry
   data/                 (gitignored) agent memory + finance_ledger.csv
   outputs/              (gitignored) generated files
@@ -114,7 +120,8 @@ Agents/
 The tool-calling loop: the agent calls the LLM; if the model requests tools, each tool
 is executed with schema-validated arguments and the results are fed back; repeat until
 the model produces a final answer or the step cap is reached. Both Anthropic Messages
-API and OpenAI-compatible chat completions are supported.
+API and OpenAI-compatible chat completions are supported. `run()` returns the final
+text; `run_stream()` yields the same steps as events so the web UI can stream progress.
 
 ## Safety
 
@@ -130,11 +137,19 @@ API and OpenAI-compatible chat completions are supported.
 ## Testing
 
 ```bash
-python selftest.py     # 40 offline checks: registry, tools, scoring, schemas, tool loop
+python selftest.py     # 54 offline checks: registry, tools, scoring, schemas, PDF, streaming, tool loop
 ```
 
 ## Roadmap
 
-- Streaming responses over the web API (SSE) for long agent runs.
-- A simple chat UI (static HTML) served by FastAPI.
-- PDF resume parsing so `skill_match` can score PDF resumes directly.
+Done:
+- PDF resume parsing is live: `skill_match` accepts PDF paths directly (via `pypdf`),
+  and a `pdf_to_text` tool lets any agent read PDF documents.
+- Streaming is live: `POST /api/v1/run/stream` emits SSE `data:` events (`meta`,
+  `assistant`, `tool_call`, `result`, `error`) so the UI updates as the agent works.
+- Chat UI is live: open `http://localhost:8000/` to chat with any agent; Ctrl+Enter
+  submits.
+
+Next up:
+- Resume score history (track scores over time), and Gmail/Sheets setup
+  instructions + credentials wiring for live use.

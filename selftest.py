@@ -20,7 +20,7 @@ from agents_core.agent import Agent
 from agents_core.registry import get_agent, list_agents
 from agents_core.llm import _parse_failed_generation
 from agents_core.scoring import score_resume, extract_skills
-from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS
+from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS, COMMON_TOOLS
 
 PASS = 0
 FAIL = 0
@@ -112,6 +112,66 @@ def main() -> int:
     print("\n== sheets tools (unconfigured) ==")
     rs2 = execute_tool(FINANCE_TOOLS, "sheets_push", {}, "finance")
     check("sheets_push gives setup error", "error" in rs2, rs2)
+
+    print("\n== PDF parsing ==")
+    try:
+        from pypdf import PdfReader  # noqa: F401
+
+        from agents_core.pdfutil import pdf_to_text
+
+        def _make_pdf(path: Path) -> None:
+            text = b"Python FastAPI Docker AWS git Kubernetes"
+            stream = b"BT /F1 12 Tf 72 720 Td (" + text + b") Tj ET"
+            objs = [
+                b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            ]
+            out = bytearray(b"%PDF-1.4\n")
+            offsets = []
+            for i, body in enumerate(objs, start=1):
+                offsets.append(len(out))
+                out += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+            xref_pos = len(out)
+            out += b"xref\n0 6\n0000000000 65535 f \n"
+            for off in offsets:
+                out += f"{off:010d} 00000 n \n".encode()
+            out += b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + str(xref_pos).encode() + b"\n%%EOF\n"
+            path.write_bytes(bytes(out))
+
+        pdf_dir = Path(os.environ["AGENT_OUTPUTS_DIR"])
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / "resume.pdf"
+        _make_pdf(pdf_path)
+
+        txt = pdf_to_text(pdf_path)
+        check("pdf_to_text extracts page text", "Python" in txt and "Docker" in txt, txt[:120])
+
+        rp = execute_tool(COMMON_TOOLS, "pdf_to_text", {"path": "resume.pdf"}, "docs")
+        check("pdf_to_text tool reads by path", "Python" in rp, rp[:120])
+
+        rp2 = execute_tool(COMMON_TOOLS, "pdf_to_text", {"path": "does-not-exist.pdf"}, "docs")
+        check("pdf_to_text reports missing file", "error" in rp2, rp2)
+
+        rp3 = execute_tool(JOBSEARCH_TOOLS, "skill_match", {"resume": "resume.pdf", "jd": "Need a Python FastAPI engineer with Docker."}, "jobsearch")
+        check("skill_match auto-extracts PDF resume", "skill match:" in rp3, rp3[:80])
+    except ImportError:
+        check("pypdf installed (for PDF tests)", False, "pip install pypdf")
+    except Exception as exc:  # noqa: BLE001
+        check("PDF tests ran", False, repr(exc))
+
+    print("\n== streaming ==")
+    agent = get_agent("docs")
+    events = list(agent.run_stream('Please write a file: @tool write_file {"path": "stream.md", "content": "streamed"}'))
+    types = [e["type"] for e in events]
+    check("stream yields tool_call event", "tool_call" in types, str(types))
+    check("stream yields result event", "result" in types, str(types))
+    check("stream result is final text", events[-1]["text"].startswith("[mock] task complete"), events[-1].get("text"))
+    sf = Path(os.environ["AGENT_OUTPUTS_DIR"]) / "stream.md"
+    check("stream tool executed file write", sf.exists() and sf.read_text() == "streamed")
+    agent.close()
 
     print("\n== failed-generation rescue parser ==")
     import json as _json
