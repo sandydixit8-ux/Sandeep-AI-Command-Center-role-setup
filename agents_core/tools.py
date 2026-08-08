@@ -466,3 +466,127 @@ GMAIL_TOOLS: list[Tool] = [
     Tool("gmail_draft", "Save a reply draft to a file for review (does not send).", tool_gmail_draft, {"type": "object", "properties": {"message_id": {"type": "string", "description": "numeric message id from gmail_inbox"}, "reply_body": {"type": "string"}}, "required": ["message_id", "reply_body"]}),
     Tool("gmail_send", "SEND an email via Gmail. Only call after the user has explicitly approved the content.", tool_gmail_send, {"type": "object", "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to", "subject", "body"]}),
 ]
+
+# ------------------------------------------------------------------ market intelligence
+
+
+def _market_module():
+    from . import market as m
+
+    return m
+
+
+def tool_market_indices() -> str:
+    return _market_module().get_provider().get_indices()
+
+
+def tool_market_quote(symbol: str) -> str:
+    s = _market_module().get_provider().get_stock(symbol)
+    if s is None:
+        raise ToolError(f"unknown symbol: {symbol}")
+    return s
+
+
+def tool_market_stocks() -> str:
+    return _market_module().get_provider().list_stocks()
+
+
+def tool_market_technical(symbol: str) -> str:
+    return _market_module().technical_view(symbol)
+
+
+def tool_market_fundamental(symbol: str) -> str:
+    return _market_module().fundamental_view(symbol)
+
+
+def tool_market_score(symbol: str) -> str:
+    return _market_module().market_score(symbol)
+
+
+def tool_market_signal(symbol: str) -> str:
+    return _market_module().signal_engine(symbol)
+
+
+def tool_market_regime() -> str:
+    return _market_module().regime_engine()
+
+
+def tool_market_screener(min_score: float | None = None, sector: str | None = None,
+                         max_pe: float | None = None, min_momentum: float | None = None,
+                         min_market_cap: float | None = None) -> str:
+    filters = {}
+    if min_score is not None:
+        filters["min_score"] = min_score
+    if sector:
+        filters["sector"] = sector
+    if max_pe is not None:
+        filters["max_pe"] = max_pe
+    if min_momentum is not None:
+        filters["min_momentum"] = min_momentum
+    if min_market_cap is not None:
+        filters["min_market_cap"] = min_market_cap
+    return _market_module().screener(filters)
+
+
+def tool_market_news(symbol: str | None = None) -> str:
+    return _market_module().news_sentiment(symbol)
+
+
+def tool_market_brief() -> str:
+    return _market_module().market_brief()
+
+
+def tool_position_size(symbol: str, capital: float, risk_per_trade_pct: float = 2.0) -> str:
+    return _market_module().position_size(symbol, capital, risk_per_trade_pct)
+
+
+def tool_portfolio_risk(positions: list[dict[str, Any]], capital: float) -> str:
+    return _market_module().portfolio_risk(positions, capital)
+
+
+def tool_backtest(symbol: str, entry_rule: str = "EMA+RSI", exit_rule: str = "stop/target",
+                  stop_loss_pct: float = 8.0, target_pct: float | None = None, days: int = 500) -> str:
+    return _market_module().backtest(symbol, entry_rule, exit_rule, stop_loss_pct, target_pct, days)
+
+
+def tool_paper_portfolio() -> str:
+    return _market_module().paper_portfolio()
+
+
+def tool_paper_buy(symbol: str, quantity: int) -> str:
+    return _market_module().paper_buy(symbol, quantity)
+
+
+def tool_paper_sell(symbol: str, quantity: int) -> str:
+    return _market_module().paper_sell(symbol, quantity)
+
+
+MARKET_TOOLS: list[Tool] = [
+    Tool("market_indices", "List tracked market indices (NIFTY 50, SENSEX, etc.) with change and status.", tool_market_indices, {"type": "object", "properties": {}}),
+    Tool("market_quote", "Get a stock quote (price, change, market cap, valuation) by symbol.", tool_market_quote, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("market_stocks", "List all stocks in the tracked market universe.", tool_market_stocks, {"type": "object", "properties": {}}),
+    Tool("market_technical", "Technical analysis of a stock: trend, momentum, volatility, volume, support/resistance.", tool_market_technical, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("market_fundamental", "Fundamental view of a stock: valuation, profitability, leverage, dividend yield.", tool_market_fundamental, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("market_score", "Transparent factor score (0-100) for a stock with per-factor evidence.", tool_market_score, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("market_signal", "Composite buy/hold/sell signal for a stock built from multiple factors with confidence.", tool_market_signal, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("market_regime", "Current market regime (Bull/Bear/Sideways) with breadth and risk tone.", tool_market_regime, {"type": "object", "properties": {}}),
+    Tool("market_screener", "Screen the stock universe by filters (score, sector, P/E, momentum, market cap).", tool_market_screener, {"type": "object", "properties": {"min_score": {"type": "number"}, "sector": {"type": "string"}, "max_pe": {"type": "number"}, "min_momentum": {"type": "number"}, "min_market_cap": {"type": "number"}}}),
+    Tool("market_news", "Market news feed with sentiment, optionally filtered by stock symbol.", tool_market_news, {"type": "object", "properties": {"symbol": {"type": "string"}}}),
+    Tool("market_brief", "One-line market brief: regime, index moves, breadth, top news.", tool_market_brief, {"type": "object", "properties": {}}),
+    Tool("position_size", "Compute position size from capital and risk-per-trade so max loss is capped.", tool_position_size, {"type": "object", "properties": {"symbol": {"type": "string"}, "capital": {"type": "number"}, "risk_per_trade_pct": {"type": "number"}}, "required": ["symbol", "capital"]}),
+    Tool("portfolio_risk", "Check portfolio exposure, sector and single-position concentration.", tool_portfolio_risk, {"type": "object", "properties": {"positions": {"type": "array", "items": {"type": "object"}}, "capital": {"type": "number"}}, "required": ["positions", "capital"]}),
+    Tool("backtest", "Backtest a strategy on demo data and return performance metrics (demo only).", tool_backtest, {"type": "object", "properties": {"symbol": {"type": "string"}, "entry_rule": {"type": "string"}, "exit_rule": {"type": "string"}, "stop_loss_pct": {"type": "number"}, "target_pct": {"type": "number"}, "days": {"type": "integer"}}, "required": ["symbol"]}),
+    Tool("paper_portfolio", "Show the simulated paper-trading portfolio (positions, cash, P&L).", tool_paper_portfolio, {"type": "object", "properties": {}}),
+    Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+    Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+]
+
+RISK_TOOLS: list[Tool] = [
+    Tool("position_size", "Compute position size from capital and risk-per-trade so max loss is capped.", tool_position_size, {"type": "object", "properties": {"symbol": {"type": "string"}, "capital": {"type": "number"}, "risk_per_trade_pct": {"type": "number"}}, "required": ["symbol", "capital"]}),
+    Tool("portfolio_risk", "Check portfolio exposure, sector and single-position concentration.", tool_portfolio_risk, {"type": "object", "properties": {"positions": {"type": "array", "items": {"type": "object"}}, "capital": {"type": "number"}}, "required": ["positions", "capital"]}),
+    Tool("market_regime", "Current market regime (Bull/Bear/Sideways) with breadth and risk tone.", tool_market_regime, {"type": "object", "properties": {}}),
+    Tool("market_signal", "Composite buy/hold/sell signal for a stock built from multiple factors with confidence.", tool_market_signal, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
+    Tool("paper_portfolio", "Show the simulated paper-trading portfolio (positions, cash, P&L).", tool_paper_portfolio, {"type": "object", "properties": {}}),
+    Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+    Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+]

@@ -25,7 +25,17 @@ from agents_core.agent import Agent
 from agents_core.registry import get_agent, list_agents
 from agents_core.llm import _parse_failed_generation, _parse_tool_arguments, _retry_after
 from agents_core.scoring import score_resume, extract_skills
-from agents_core.tools import execute_tool, build_tools, FINANCE_TOOLS, GMAIL_TOOLS, JOBSEARCH_TOOLS, COMMON_TOOLS
+from agents_core.tools import (
+    execute_tool,
+    build_tools,
+    FINANCE_TOOLS,
+    GMAIL_TOOLS,
+    JOBSEARCH_TOOLS,
+    COMMON_TOOLS,
+    MARKET_TOOLS,
+    RISK_TOOLS,
+)
+from agents_core import market as mkt
 
 PASS = 0
 FAIL = 0
@@ -44,15 +54,27 @@ def check(label: str, cond: bool, detail: str = "") -> None:
 def main() -> int:
     print("== registry ==")
     keys = list_agents()
-    for expected in ("commander", "exec", "finance", "bd", "jobsearch", "marketing", "docs", "coach"):
+    for expected in ("commander", "exec", "finance", "bd", "jobsearch", "marketing", "docs", "coach", "market", "risk"):
         check(f"agent registered: {expected}", expected in keys)
 
     print("\n== commander has all tools ==")
     cmdr = get_agent("commander")
     names = {t.name for t in cmdr.tools}
-    for tool in ("ledger_add", "ledger_summary", "skill_match", "gmail_inbox", "gmail_send", "web_search", "write_file"):
+    for tool in ("ledger_add", "ledger_summary", "skill_match", "gmail_inbox", "gmail_send", "web_search", "write_file", "market_signal", "market_regime"):
         check(f"commander has tool: {tool}", tool in names)
     cmdr.close()
+
+    print("\n== market/risk agents have market tools ==")
+    mkt_agent = get_agent("market")
+    mkt_names = {t.name for t in mkt_agent.tools}
+    for tool in ("market_indices", "market_quote", "market_technical", "market_fundamental", "market_score", "market_signal", "market_screener", "market_brief", "market_news", "paper_buy", "paper_sell"):
+        check(f"market agent has tool: {tool}", tool in mkt_names, str(sorted(mkt_names)))
+    mkt_agent.close()
+    risk_agent = get_agent("risk")
+    risk_names = {t.name for t in risk_agent.tools}
+    for tool in ("position_size", "portfolio_risk", "market_regime", "paper_portfolio"):
+        check(f"risk agent has tool: {tool}", tool in risk_names, str(sorted(risk_names)))
+    risk_agent.close()
 
     print("\n== tool schemas ==")
     t = build_tools("docs")[0]
@@ -195,6 +217,109 @@ def main() -> int:
         check("pypdf installed (for PDF tests)", False, "pip install pypdf")
     except Exception as exc:  # noqa: BLE001
         check("PDF tests ran", False, repr(exc))
+
+    print("\n== market engine: indicators ==")
+    closes = [float(i) for i in range(1, 31)]
+    sma20 = mkt.sma(closes, 20)
+    check("sma(20) has 19 leading Nones", sma20[:19] == [None] * 19 and sma20[-1] == 20.5, str(sma20[-1]))
+    ema3 = mkt.ema(closes, 3)
+    check("ema(3) length matches", len(ema3) == len(closes) and ema3[0] is None)
+    r = mkt.rsi(closes, 14)
+    check("rsi of steadily rising series near 100", r is not None and (r[-1] or 0) > 90, str(r[-1]))
+    bb = mkt.bollinger(closes, 20)
+    check("bollinger upper > mid > lower", bb["upper"][-1] > bb["mid"][-1] > bb["lower"][-1])
+    series = mkt.get_provider().ohlc("RELIANCE", 60)
+    a = mkt.atr(series, 14)
+    check("atr is positive on real series", a[-1] is not None and a[-1] > 0, str(a[-1]))
+    check("vwap within price range", 0 < mkt.vwap(series) < 10_000)
+    sr = mkt.support_resistance(series)
+    check("support < resistance", sr["support"] < sr["resistance"])
+
+    print("\n== market engine: scoring ==")
+    sc = mkt.market_score("TCS")
+    check("score in 0..100", 0 <= sc["score"] <= 100, str(sc["score"]))
+    check("score has 6 weighted factors", len(sc["factors"]) == 6 and all("evidence" in f for f in sc["factors"]))
+    check("score model tag", sc["model"] == "mkt-score-v1")
+
+    print("\n== market engine: composite signal ==")
+    sig = mkt.signal_engine("TCS")
+    check("signal is one of the allowed set", sig["signal"] in ("BUY CANDIDATE", "SELL / REDUCE RISK", "HOLD / WATCH", "NO SIGNAL"), sig["signal"])
+    check("signal confidence 0..100", 0 <= sig["confidence"] <= 100)
+    check("signal combines multiple factors", sig["total_factors"] >= 4 and len(sig["checks"]) == sig["total_factors"])
+    check("signal carries disclaimer", "not investment advice" in sig["disclaimer"])
+    lone = mkt.signal_engine("INFY")
+    check("composite signal respects evidence strength", lone["evidence_strength"] in ("High", "Moderate", "Low"))
+
+    print("\n== market engine: regime ==")
+    reg = mkt.regime_engine()
+    check("regime detected", reg["regime"].split(" ")[0] in ("Bull", "Bear", "Sideways"), reg["regime"])
+    check("regime has breadth + tone", 0 <= reg["breadth"] <= 1 and reg["tone"] in ("Risk-On", "Risk-Off", "Mixed"))
+    check("regime has evidence", "evidence" in reg and len(reg["evidence"]) > 5)
+
+    print("\n== market engine: screener ==")
+    all_stocks = mkt.screener({})
+    check("screener returns full universe", len(all_stocks) == len(mkt.STOCKS))
+    filtered = mkt.screener({"sector": "Banking"})
+    check("screener filters by sector", all(s["sector"] == "Banking" for s in filtered) and 0 < len(filtered) < len(all_stocks))
+    scored = mkt.screener({"min_score": 60})
+    check("screener min_score respected", all(s["ai_score"] >= 60 for s in scored))
+    sorted_scores = [s["ai_score"] for s in all_stocks]
+    check("screener sorted by score desc", sorted_scores == sorted(sorted_scores, reverse=True))
+
+    print("\n== market engine: position sizing ==")
+    ps = mkt.position_size("RELIANCE", 100_000, risk_per_trade_pct=2.0)
+    check("sizing caps max risk", ps["max_risk"] == 2000.0, str(ps["max_risk"]))
+    check("sizing qty is floor of risk/stop", ps["max_quantity"] >= 1 and ps["max_quantity"] * (ps["price"] - ps["stop_loss_price"]) <= 2000.0 + 1e-6)
+    check("sizing explains the math", "max risk" in ps["explanation"].lower() and "stop distance" in ps["explanation"].lower())
+
+    print("\n== market engine: portfolio risk ==")
+    pr = mkt.portfolio_risk([{"symbol": "RELIANCE", "value": 400_000}, {"symbol": "INFY", "value": 100_000}], capital=500_000)
+    check("portfolio exposure computed", pr["exposure_pct"] == 100.0, str(pr["exposure_pct"]))
+    check("sector concentration flagged", any("concentration" in f for f in pr["flags"]))
+    pr2 = mkt.portfolio_risk(
+        [{"symbol": "RELIANCE", "value": 20_000}, {"symbol": "ITC", "value": 25_000}, {"symbol": "SUNPHARMA", "value": 20_000}],
+        capital=500_000,
+    )
+    check("low-risk portfolio has no flags", any("risk limits" in f for f in pr2["flags"]), str(pr2["flags"]))
+
+    print("\n== market engine: backtest ==")
+    bt = mkt.backtest("RELIANCE", "EMA+RSI", "stop/target", stop_loss_pct=8.0, days=500)
+    check("backtest returns metrics", "cagr_pct" in bt and "sharpe" in bt and "max_drawdown_pct" in bt)
+    check("backtest metrics are numeric", isinstance(bt["sharpe"], float) and isinstance(bt["total_return_pct"], float))
+    check("backtest equity curve non-empty", len(bt["equity_curve"]) >= 30)
+    check("backtest anti-overfit grade", bt["strategy_quality"]["grade"] in ("Good", "Caution", "Poor"))
+    check("backtest disclaimer present", "does not guarantee" in bt["disclaimer"])
+
+    print("\n== market engine: paper trading ==")
+    pf0 = mkt.paper_portfolio()
+    check("paper starts with demo capital", pf0["cash"] == 1_000_000 and pf0["mode"] == "paper")
+    b = mkt.paper_buy("TCS", 10)
+    check("paper buy executes simulated", "PAPER TRADE" in b["status"] and b["cash"] < 1_000_000)
+    pf1 = mkt.paper_portfolio()
+    check("paper portfolio reflects position", any(p["symbol"] == "TCS" for p in pf1["positions"]))
+    s = mkt.paper_sell("TCS", 10)
+    check("paper sell clears position", s["symbol"] == "TCS" and not any(p["symbol"] == "TCS" for p in mkt.paper_portfolio()["positions"]))
+    check("paper sell logs pnl", any(t["symbol"] == "TCS" and t["type"] == "SELL" for t in mkt.paper_portfolio()["trades"]))
+
+    print("\n== market engine: market tools via execute_tool ==")
+    rq = execute_tool(MARKET_TOOLS, "market_quote", {"symbol": "TCS"}, "market")
+    check("market_quote tool works", "Tata Consultancy" in rq, rq[:80])
+    rr = execute_tool(MARKET_TOOLS, "market_regime", {}, "market")
+    check("market_regime tool works", '"regime"' in rr, rr[:80])
+    rs = execute_tool(MARKET_TOOLS, "market_signal", {"symbol": "INFY"}, "market")
+    check("market_signal tool works", '"signal"' in rs and '"confidence"' in rs, rs[:80])
+    rp = execute_tool(RISK_TOOLS, "position_size", {"symbol": "RELIANCE", "capital": 200_000}, "risk")
+    check("position_size tool works", '"max_risk": 4000.0' in rp, rp[:120])
+    rerr = execute_tool(MARKET_TOOLS, "market_quote", {"symbol": "NOTREAL"}, "market")
+    check("market_quote errors on unknown symbol", "error" in rerr, rerr[:80])
+
+    print("\n== market engine: news + brief ==")
+    news = mkt.news_sentiment()
+    check("news feed non-empty", len(news) > 0)
+    ns = mkt.news_sentiment("RELIANCE")
+    check("news filters by sector", all(n["sector"] in ("Energy", "Economy", "Global") for n in ns))
+    brief = mkt.market_brief()
+    check("brief has summary + regime", "summary" in brief and "regime" in brief and len(brief["summary"]) > 20)
 
     print("\n== streaming ==")
     agent = get_agent("docs")

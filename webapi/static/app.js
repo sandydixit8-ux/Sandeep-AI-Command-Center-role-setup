@@ -102,8 +102,8 @@
   }
   function currentRoute() {
     const h = location.hash.replace(/^#\/?/, "");
-    const [view, param] = h.split("/");
-    return { view: view || "home", param: param ? decodeURIComponent(param) : null };
+    const parts = h.split("/").map(p => decodeURIComponent(p));
+    return { view: parts[0] || "home", param: parts[1] ?? null, rest: parts.slice(1) };
   }
   window.addEventListener("hashchange", render);
 
@@ -122,6 +122,7 @@
     { view: "home", ic: "🏠", label: "Home" },
     { view: "chat", ic: "💬", label: "AI Chat" },
     { view: "agents", ic: "🤖", label: "Agents" },
+    { view: "market", ic: "📈", label: "Market AI" },
     { view: "tasks", ic: "📋", label: "Tasks" },
     { view: "automations", ic: "⚡", label: "Automations" },
     { view: "files", ic: "📁", label: "Files" },
@@ -364,7 +365,7 @@
     const headerTitle = NAV.find(n => n.view === view)?.label || "Home";
     $("#headerTitle").textContent = headerTitle;
 
-    const views = { home, chat, agents, tasks, automations, files, analytics, documents, knowledge, integrations, settings };
+    const views = { home, chat, agents, tasks, automations, files, analytics, documents, knowledge, integrations, settings, market };
     (views[view] || home)(content, param);
     content.scrollTop = 0;
   }
@@ -1354,6 +1355,579 @@
       '<div class="modal-foot"><button class="btn btn-primary" id="secClose">Got it</button></div>'
     );
     $("#secClose").addEventListener("click", closeModal);
+  }
+
+  /* ---------------- Market AI ---------------- */
+  const MKT_TABS = [
+    ["overview", "📊", "Overview"],
+    ["brief", "🗞️", "Brief"],
+    ["stocks", "🔍", "Stocks"],
+    ["screener", "🎛️", "Screener"],
+    ["watchlist", "⭐", "Watchlist"],
+    ["signals", "🔔", "Signals"],
+    ["portfolio", "💼", "Portfolio"],
+    ["paper", "🧪", "Paper Trading"],
+    ["backtest", "📈", "Backtest"],
+    ["risk", "🛡️", "Risk Center"],
+    ["alerts", "🚨", "Alerts"],
+    ["journal", "📓", "Journal"],
+    ["monitoring", "🧠", "Monitoring"],
+    ["audit", "🔏", "Audit"],
+  ];
+  const MKT_HINTS = {
+    overview: "Regime, breadth and the day's moves in one screen.",
+    brief: "One-line AI interpretation of the market state.",
+    stocks: "Browse the tracked universe and open a stock's full intelligence report.",
+    screener: "Filter the universe by score, sector, valuation and momentum.",
+    watchlist: "Your saved symbols, refreshed with live demo quotes.",
+    signals: "Composite signals across the whole universe, never a single indicator.",
+    portfolio: "Simulated paper portfolio value, exposure and P&L.",
+    paper: "Execute simulated buys and sells — no real money, ever.",
+    backtest: "EMA+RSI strategy backtest on demo data with anti-overfit grading.",
+    risk: "Position sizing from risk per trade and portfolio concentration checks.",
+    alerts: "Rule-based alerts on signals, price moves and risk flags.",
+    journal: "Every paper trade logged with entry, exit and P&L.",
+    monitoring: "Data source status, quality and model versions.",
+    audit: "A readable log of every market action taken in this workspace.",
+  };
+
+  function market(content) {
+    const route = currentRoute();
+    const sub = (route.rest && route.rest[0]) || "overview";
+    const tab = MKT_TABS.find(t => t[0] === sub) || MKT_TABS[0];
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <div><div class="page-title">Market AI</div>
+          <div class="page-desc" id="mktHint">${MKT_HINTS[tab[0]]}</div></div>
+          <button class="btn btn-soft" id="mktChat">💬 Ask Market agent</button>
+        </div>
+        <div class="seg mkt-tabs" id="mktTabs">
+          ${MKT_TABS.map(t => '<button data-t="' + t[0] + '" class="' + (t[0] === sub ? "sel" : "") + '"><span>' + t[1] + '</span>' + t[2] + '</button>').join("")}
+        </div>
+        <div id="mktBody" style="margin-top:16px"></div>
+      </div>`;
+    $$("#mktTabs button").forEach(b => b.addEventListener("click", () => {
+      const t = b.dataset.t;
+      navigate("market", t === "overview" ? "" : t);
+    }));
+    $("#mktChat").addEventListener("click", () => {
+      state.activeAgent = "market";
+      localStorage.setItem("acc-agent", "market");
+      state.chat = [];
+      navigate("chat");
+      setTimeout(() => { addUserMessage("Give me today's market brief, the current regime and a composite signal for TCS."); runAgentTask("Give me today's market brief, the current regime and a composite signal for TCS."); }, 60);
+    });
+    const body = $("#mktBody");
+    const subs = { overview: mOverview, brief: mBrief, stocks: mStocks, stock: mStock, screener: mScreener, watchlist: mWatchlist, signals: mSignals, portfolio: mPortfolio, paper: mPaper, backtest: mBacktest, risk: mRisk, alerts: mAlerts, journal: mJournal, monitoring: mMonitoring, audit: mAudit };
+    (subs[sub] || mOverview)(body, route);
+  }
+
+  function mktLoading() { return '<div class="empty" style="display:flex"><div class="empty-ic">📈</div><h3>Loading market data…</h3><p>Fetching demo data from the market provider.</p></div>'; }
+  function mktError(e) { return '<div class="empty" style="display:flex"><div class="empty-ic">⚠️</div><h3>Could not load market data</h3><p>' + esc(e && e.message || String(e)) + '</p></div>'; }
+  function mktStat(label, value, sub) { return '<div class="card kpi"><div class="kpi-label">' + label + '</div><div class="kpi-value">' + value + '</div>' + (sub ? '<div class="kpi-delta">' + sub + '</div>' : "") + '</div>'; }
+  function fmtInr(v) {
+    if (v === undefined || v === null || isNaN(v)) return "—";
+    return "₹" + Number(v).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+  }
+  function fmtNum(v, d) { return (v === undefined || v === null) ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: d || 0 }); }
+  function fmtPct(v, d) { return (v === undefined || v === null) ? "—" : (v > 0 ? "+" : "") + Number(v).toFixed(d === undefined ? 2 : d) + "%"; }
+  function sigClass(sig) {
+    if (!sig) return "badge";
+    if (sig.includes("BUY")) return "badge ok";
+    if (sig.includes("SELL")) return "badge err";
+    return "badge wait";
+  }
+  function sparkSvg(closes, w, h) {
+    if (!closes || closes.length < 2) return '<div class="muted small">No series</div>';
+    w = w || 340; h = h || 84;
+    const min = Math.min(...closes), max = Math.max(...closes);
+    const span = (max - min) || 1;
+    const x = i => 4 + (i / (closes.length - 1)) * (w - 8);
+    const y = v => 6 + (h - 12) - ((v - min) / span) * (h - 12);
+    const pts = closes.map((v, i) => x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
+    const up = closes[closes.length - 1] >= closes[0];
+    const col = up ? "var(--ok)" : "var(--err)";
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="100%" preserveAspectRatio="none" role="img" aria-label="Price chart">' +
+      '<polyline points="' + pts + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round"/>' +
+      '</svg>';
+  }
+
+  function mOverview(body) {
+    body.innerHTML = mktLoading();
+    Promise.allSettled([window.MarketClient.brief(), window.MarketClient.regime(), window.MarketClient.indices(), window.MarketClient.news(), window.MarketClient.signal("RELIANCE")]).then(([brief, reg, idx, news, sig]) => {
+      if (brief.status !== "fulfilled") { body.innerHTML = mktError(brief.reason); return; }
+      const b = brief.value, r = reg.status === "fulfilled" ? reg.value : null, ind = idx.status === "fulfilled" ? idx.value : [], nw = news.status === "fulfilled" ? news.value : [];
+      const s = sig.status === "fulfilled" ? sig.value : null;
+      body.innerHTML = `
+        <div class="mkt-banner">
+          <div class="row" style="flex-wrap:wrap;gap:12px">
+            <span class="badge ${b.regime.regime.toLowerCase().includes("bear") ? "err" : b.regime.regime.toLowerCase().includes("bull") ? "ok" : "wait"}">${esc(b.regime.regime)}</span>
+            <span class="badge">${esc(b.regime.tone)}</span>
+            <span class="badge">Breadth ${Math.round(b.regime.breadth * 100)}%</span>
+            <span class="muted small grow text-right">${esc(b.data_status)}</span>
+          </div>
+          <div class="mkt-summary">${esc(b.summary)}</div>
+          <div class="mkt-interp">🤖 ${esc(b.ai_interpretation)}</div>
+        </div>
+        <div class="dash-grid" style="margin-top:14px">
+          ${r ? mktStat("Regime", r.regime.split(" ")[0], r.tone) : ""}
+          ${mktStat("NIFTY 50", fmtNum(b.indices[0] && b.indices[0].value), fmtPct(b.indices[0] && b.indices[0].change_pct))}
+          ${mktStat("Indices up", (b.regime.breadth * 6).toFixed(0) + " / 6", "breadth")}
+          ${s ? mktStat("RELIANCE signal", s.signal, "conf " + s.confidence + "%") : ""}
+        </div>
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">Indices</div>
+            <table class="tbl"><thead><tr><th>Index</th><th>Value</th><th>Change</th></tr></thead><tbody>
+            ${ind.map(i => '<tr><td><b>' + esc(i.symbol) + '</b><div class="muted small">' + esc(i.name) + '</div></td><td>' + fmtNum(i.value, 2) + '</td><td class="' + (i.change_pct >= 0 ? "up" : "down") + '">' + fmtPct(i.change_pct) + '</td></tr>').join("")}
+            </tbody></table>
+          </div>
+          <div class="card"><div class="card-title">News & sentiment</div>
+            ${nw.slice(0, 6).map(n => '<div class="kn-item"><div class="kn-ic">' + (n.sentiment === "Positive" ? "🟢" : n.sentiment === "Negative" ? "🔴" : "🟡") + '</div><div class="grow"><b>' + esc(n.title) + '</b><div class="muted small">' + esc(n.source) + ' · ' + esc(n.time) + '</div></div><span class="badge ' + (n.sentiment === "Positive" ? "ok" : n.sentiment === "Negative" ? "err" : "wait") + '">' + n.sentiment + '</span></div>').join("")}
+            ${!nw.length ? '<div class="muted small">No news yet.</div>' : ""}
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top:16px">
+          ${mktQuick("🎛️", "Screener", "Find stocks by score & sector", "screener")}
+          ${mktQuick("📈", "Backtest", "Test the EMA+RSI strategy", "backtest")}
+          ${mktQuick("🧪", "Paper Trading", "Simulate trades safely", "paper")}
+        </div>`;
+    });
+  }
+  function mktQuick(ic, t, d, view) {
+    return '<div class="card hoverable" data-goto="' + view + '" style="cursor:pointer"><div class="row"><span class="avatar sm">' + ic + '</span><b>' + t + '</b></div><div class="card-sub" style="margin-top:8px">' + d + '</div><div style="margin-top:10px"><span class="badge">Open →</span></div></div>';
+  }
+
+  function mBrief(body) {
+    body.innerHTML = mktLoading();
+    window.MarketClient.brief().then(b => {
+      body.innerHTML = `
+        <div class="mkt-banner">
+          <div class="row" style="flex-wrap:wrap;gap:12px">
+            <span class="badge ${b.regime.regime.toLowerCase().includes("bear") ? "err" : b.regime.regime.toLowerCase().includes("bull") ? "ok" : "wait"}">${esc(b.regime.regime)}</span>
+            <span class="badge">${esc(b.regime.tone)}</span>
+            <span class="muted small grow text-right">${esc(b.data_status)}</span>
+          </div>
+          <div class="mkt-summary">${esc(b.summary)}</div>
+          <div class="mkt-interp">🤖 ${esc(b.ai_interpretation)}</div>
+        </div>
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">Top gainers</div>
+            <table class="tbl"><tbody>${b.top_gainers.map(g => '<tr><td><b>' + esc(g.symbol) + '</b></td><td class="up">' + fmtPct(g.change_pct) + '</td></tr>').join("") || '<tr><td class="muted">None</td></tr>'}</tbody></table>
+          </div>
+          <div class="card"><div class="card-title">Top losers</div>
+            <table class="tbl"><tbody>${b.top_losers.map(g => '<tr><td><b>' + esc(g.symbol) + '</b></td><td class="down">' + fmtPct(g.change_pct) + '</td></tr>').join("") || '<tr><td class="muted">None</td></tr>'}</tbody></table>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px"><div class="card-title">Headlines</div>
+          ${b.news.map(n => '<div class="kn-item"><div class="kn-ic">' + (n.sentiment === "Positive" ? "🟢" : n.sentiment === "Negative" ? "🔴" : "🟡") + '</div><div class="grow"><b>' + esc(n.title) + '</b><div class="muted small">' + esc(n.source) + '</div></div></div>').join("")}
+        </div>
+        <div class="card" style="margin-top:16px"><div class="card-title">Indices</div>
+          <table class="tbl"><thead><tr><th>Index</th><th>Value</th><th>Change</th><th>Status</th></tr></thead><tbody>
+          ${b.indices.map(i => '<tr><td><b>' + esc(i.symbol) + '</b></td><td>' + fmtNum(i.value, 2) + '</td><td class="' + (i.change_pct >= 0 ? "up" : "down") + '">' + fmtPct(i.change_pct) + '</td><td class="muted small">' + esc(i.status) + '</td></tr>').join("")}
+          </tbody></table>
+        </div>`;
+    }).catch(e => { body.innerHTML = mktError(e); });
+  }
+
+  function mStocks(body) {
+    body.innerHTML = mktLoading();
+    window.MarketClient.stocks().then(list => {
+      body.innerHTML = `
+        <div class="toolbar"><div class="search-input"><span>🔍</span><input id="mktStockSearch" placeholder="Filter stocks by symbol or name…"></div>
+        <span class="muted small">${list.length} symbols · ${esc(list[0] ? list[0].quality : "")}</span></div>
+        <div class="table-wrap" style="margin-top:12px"><table class="tbl">
+          <thead><tr><th>Symbol</th><th>Name</th><th>Sector</th><th>Price</th><th>Change</th><th>Mkt Cap</th><th>P/E</th><th></th></tr></thead>
+          <tbody id="mktStockRows"></tbody></table></div>`;
+      const rows = $("#mktStockRows");
+      const render = (q) => {
+        const ql = (q || "").toLowerCase();
+        rows.innerHTML = list.filter(s => !ql || (s.symbol + " " + s.name).toLowerCase().includes(ql)).map(s =>
+          '<tr data-sym="' + esc(s.symbol) + '" style="cursor:pointer"><td><b>' + esc(s.symbol) + '</b></td><td>' + esc(s.name) + '</td><td class="muted">' + esc(s.sector) + '</td>' +
+          '<td>' + fmtNum(s.price, 2) + '</td><td class="' + (s.change_pct >= 0 ? "up" : "down") + '">' + fmtPct(s.change_pct) + '</td>' +
+          '<td>' + fmtInr(s.market_cap) + '</td><td>' + s.pe + '</td><td><button class="btn btn-sm btn-soft" data-open="' + esc(s.symbol) + '">Analyze</button></td></tr>').join("") ||
+          '<tr><td colspan="8" class="muted">No matches.</td></tr>';
+      };
+      render("");
+      $("#mktStockSearch").addEventListener("input", e => render(e.target.value));
+      $$("#mktStockRows [data-open]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); navigate("market/stock/" + encodeURIComponent(b.dataset.open)); }));
+      $$("#mktStockRows tr[data-sym]").forEach(tr => tr.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(tr.dataset.sym))));
+    }).catch(e => { body.innerHTML = mktError(e); });
+  }
+
+  function mStock(body, route) {
+    const symbol = (route.rest && route.rest[1]) || "RELIANCE";
+    body.innerHTML = mktLoading();
+    const jobs = [window.MarketClient.quote(symbol), window.MarketClient.technical(symbol), window.MarketClient.fundamental(symbol), window.MarketClient.score(symbol), window.MarketClient.signal(symbol), window.MarketClient.ohlc(symbol, 120)];
+    Promise.allSettled(jobs).then(([q, t, f, sc, sg, oc]) => {
+      if (q.status !== "fulfilled") { body.innerHTML = mktError(q.reason); return; }
+      const quote = q.value, tech = t.status === "fulfilled" ? t.value : null, fund = f.status === "fulfilled" ? f.value : null, score = sc.status === "fulfilled" ? sc.value : null, sig = sg.status === "fulfilled" ? sg.value : null, ohlc = oc.status === "fulfilled" ? oc.value : [];
+      const closes = ohlc.map(o => o.close);
+      body.innerHTML = `
+        <div class="mkt-banner">
+          <div class="row" style="flex-wrap:wrap;gap:12px;align-items:center">
+            <span class="avatar ai lg" style="font-size:20px">📈</span>
+            <div class="grow"><b style="font-size:18px">${esc(quote.symbol)}</b> <span class="muted">${esc(quote.name)} · ${esc(quote.exchange)}</span>
+            <div><span style="font-size:20px;font-weight:700">${fmtNum(quote.price, 2)}</span> <span class="${quote.change_pct >= 0 ? "up" : "down"}">${fmtPct(quote.change_pct)}</span></div></div>
+            <span class="muted small">${esc(quote.quality)}<br>${esc(quote.timestamp)}</span>
+          </div>
+          ${sig ? '<div class="row" style="gap:10px;margin-top:12px;flex-wrap:wrap"><span class="badge ' + sigClass(sig.signal) + '" style="font-size:13px;padding:6px 12px">Signal: ' + esc(sig.signal) + '</span><span class="badge">Confidence ' + sig.confidence + '%</span><span class="badge">Evidence ' + sig.evidence_strength + '</span><button class="btn btn-sm btn-soft" data-wl="' + esc(quote.symbol) + '">⭐ Watchlist</button><button class="btn btn-sm" data-paper="' + esc(quote.symbol) + '">🧪 Paper trade</button></div>' : ""}
+        </div>
+        <div class="dash-grid" style="margin-top:14px">
+          ${score ? mktStat("AI Score", score.score, "/100") : ""}
+          ${tech ? mktStat("Trend", tech.trend.value, tech.momentum.value + " momentum") : ""}
+          ${tech ? mktStat("Volatility", tech.volatility.value, tech.volume.value + " volume") : ""}
+          ${tech ? mktStat("Support", fmtNum(tech.support, 0), "Resist " + fmtNum(tech.resistance, 0)) : ""}
+        </div>
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">Price (120 sessions)</div><div style="height:120px">${sparkSvg(closes)}</div>
+            <div class="row small muted" style="margin-top:8px"><span>VWAP ${fmtNum(tech && tech.vwap, 2)}</span><span class="grow"></span><span>ATR ${fmtNum(tech && tech.atr, 2)}</span><span>RSI ${tech ? tech.rsi : "—"}</span></div>
+          </div>
+          <div class="card"><div class="card-title">Fundamentals</div>
+            <div class="grid-3" style="gap:10px">
+              ${fund ? [["Mkt Cap", fmtInr(fund.market_cap)], ["P/E", fund.pe], ["P/B", fund.pb], ["ROE", fund.roe + "%"], ["ROCE", fund.roce + "%"], ["D/E", fund.de], ["Div yield", fund.div_yield + "%"], ["EPS", "₹" + fund.eps], ["Promoter", fund.promoter + "%"]].map(([k, v]) => '<div class="card" style="padding:10px"><div class="kpi-label">' + k + '</div><div class="kpi-value" style="font-size:16px">' + v + '</div></div>').join("") : ""}
+            </div>
+            <div class="muted small" style="margin-top:10px">${fund ? esc(fund.note) : ""}</div>
+          </div>
+        </div>
+        ${score ? '<div class="card" style="margin-top:16px"><div class="card-title">AI score factors — ${score.model}</div>' +
+          score.factors.map(fx => '<div class="spread" style="padding:7px 0;border-bottom:1px solid var(--border)"><span><b>' + esc(fx.name) + '</b> <span class="muted small">' + esc(fx.evidence) + '</span></span><span class="badge">' + fx.score + '</span></div>').join("") + '</div>' : ""}
+        ${sig ? '<div class="card" style="margin-top:16px"><div class="card-title">Signal checks (composite)</div>' +
+          sig.checks.map(c => '<div class="spread" style="padding:7px 0;border-bottom:1px solid var(--border)"><span>' + esc(c.factor) + ' <span class="muted small">' + esc(c.evidence) + '</span></span><span class="badge ' + (c.support === "BUY" ? "ok" : "err") + '">' + c.support + '</span></div>').join("") +
+          '<div class="muted small" style="padding-top:8px">' + esc(sig.disclaimer) + '</div></div>' : ""}`;
+      const wlBtn = $("[data-wl]", body);
+      if (wlBtn) wlBtn.addEventListener("click", () => { const wl = JSON.parse(localStorage.getItem("acc-wl") || "[]"); if (!wl.includes(symbol)) { wl.push(symbol); localStorage.setItem("acc-wl", JSON.stringify(wl)); mktAudit("WATCHLIST + " + symbol); toast("Watchlist", symbol + " added.", "ok"); } else toast("Watchlist", symbol + " already saved.", "warn"); });
+      const pBtn = $("[data-paper]", body);
+      if (pBtn) pBtn.addEventListener("click", () => navigate("market/paper"));
+    });
+  }
+
+  function mScreener(body) {
+    const sectors = ["Energy", "Automobile", "IT Services", "Banking", "FMCG", "Telecom", "Infrastructure", "Consumer", "Pharma", "Finance"];
+    body.innerHTML = `
+      <div class="card"><div class="row" style="flex-wrap:wrap;gap:12px">
+        <div class="field grow" style="margin:0"><label>Min AI score</label><input type="number" id="scrScore" value="50" min="0" max="100"></div>
+        <div class="field grow" style="margin:0"><label>Sector</label><select id="scrSector"><option value="">Any</option>${sectors.map(s => '<option>' + s + '</option>').join("")}</select></div>
+        <div class="field grow" style="margin:0"><label>Max P/E</label><input type="number" id="scrPe" value="40" min="0"></div>
+        <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="scrRun">Run screener</button></div>
+      </div></div>
+      <div id="scrResults" style="margin-top:16px"></div>`;
+    const run = () => {
+      const res = $("#scrResults");
+      res.innerHTML = mktLoading();
+      window.MarketClient.screener({ min_score: parseFloat($("#scrScore").value) || 0, sector: $("#scrSector").value || null, max_pe: parseFloat($("#scrPe").value) || null }).then(list => {
+        res.innerHTML = '<div class="card" style="padding:0;overflow:hidden"><table class="tbl"><thead><tr><th>Symbol</th><th>Name</th><th>Sector</th><th>Price</th><th>Change</th><th>P/E</th><th>RSI</th><th>AI Score</th><th></th></tr></thead><tbody>' +
+          list.map(s => '<tr data-sym="' + esc(s.symbol) + '" style="cursor:pointer"><td><b>' + esc(s.symbol) + '</b></td><td>' + esc(s.name) + '</td><td class="muted">' + esc(s.sector) + '</td><td>' + fmtNum(s.price, 2) + '</td><td class="' + (s.change_pct >= 0 ? "up" : "down") + '">' + fmtPct(s.change_pct) + '</td><td>' + s.pe + '</td><td>' + (s.rsi ?? "—") + '</td><td><span class="badge">' + s.ai_score + '</span></td><td><button class="btn btn-sm btn-soft" data-open="' + esc(s.symbol) + '">Analyze</button></td></tr>').join("") +
+          '</tbody></table>' + (list.length ? '<div class="muted small" style="padding:10px">' + list.length + ' stocks matched.</div>' : '<div class="empty" style="display:flex"><div class="empty-ic">🎛️</div><h3>No matches</h3><p>Loosen the filters to see more stocks.</p></div>') + '</div>';
+        $$("#scrResults [data-open]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); navigate("market/stock/" + encodeURIComponent(b.dataset.open)); }));
+        $$("#scrResults tr[data-sym]").forEach(tr => tr.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(tr.dataset.sym))));
+      }).catch(e => { res.innerHTML = mktError(e); });
+    };
+    $("#scrRun").addEventListener("click", run);
+    run();
+  }
+
+  function mWatchlist(body) {
+    body.innerHTML = `
+      <div class="toolbar"><div class="search-input"><span>＋</span><input id="wlAdd" placeholder="Add symbol, e.g. TCS"></div><button class="btn" id="wlAddBtn">Add to watchlist</button>
+      <button class="btn btn-ghost" id="wlClear">Clear all</button></div>
+      <div id="wlList" style="margin-top:16px"></div>`;
+    const render = () => {
+      const wl = JSON.parse(localStorage.getItem("acc-wl") || "[]");
+      const list = $("#wlList");
+      if (!wl.length) { list.innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">⭐</div><h3>Watchlist is empty</h3><p>Add symbols to track them here.</p></div>'; return; }
+      list.innerHTML = mktLoading();
+      Promise.allSettled(wl.map(s => window.MarketClient.signal(s))).then(results => {
+        list.innerHTML = '<div class="grid-cards">' + results.map((r, i) => {
+          if (r.status !== "fulfilled") return '<div class="card"><b>' + esc(wl[i]) + '</b><div class="muted small">' + esc(r.reason.message) + '</div></div>';
+          const s = r.value;
+          return '<div class="card"><div class="spread"><b>' + esc(s.symbol) + '</b><span class="badge ' + sigClass(s.signal) + '">' + esc(s.signal) + '</span></div><div class="card-sub" style="margin-top:6px">' + esc(s.name) + '</div><div class="row small muted" style="margin-top:10px"><span>Conf ' + s.confidence + '%</span><span class="grow"></span></div><div class="row" style="margin-top:10px"><button class="btn btn-sm btn-soft" data-open="' + esc(s.symbol) + '">Analyze</button><button class="btn btn-sm btn-ghost" data-rm="' + esc(s.symbol) + '">✕</button></div></div>';
+        }).join("") + '</div>';
+        $$("#wlList [data-open]").forEach(b => b.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(b.dataset.open))));
+        $$("#wlList [data-rm]").forEach(b => b.addEventListener("click", () => { let w = JSON.parse(localStorage.getItem("acc-wl") || "[]"); w = w.filter(x => x !== b.dataset.rm); localStorage.setItem("acc-wl", JSON.stringify(w)); render(); }));
+      });
+    };
+    const add = () => {
+      const v = $("#wlAdd").value.trim().toUpperCase();
+      if (!v) return;
+      let w = JSON.parse(localStorage.getItem("acc-wl") || "[]");
+      if (!w.includes(v)) { w.push(v); localStorage.setItem("acc-wl", JSON.stringify(w)); toast("Watchlist", v + " added.", "ok"); }
+      $("#wlAdd").value = "";
+      render();
+    };
+    $("#wlAddBtn").addEventListener("click", add);
+    $("#wlAdd").addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+    $("#wlClear").addEventListener("click", () => { localStorage.setItem("acc-wl", "[]"); render(); toast("Watchlist", "Cleared.", "warn"); });
+    render();
+  }
+
+  function mSignals(body) {
+    body.innerHTML = mktLoading();
+    window.MarketClient.stocks().then(list => {
+      Promise.allSettled(list.map(s => window.MarketClient.signal(s.symbol))).then(results => {
+        const rows = results.map((r, i) => r.status === "fulfilled" ? r.value : { symbol: list[i].symbol, signal: "ERROR", confidence: 0, checks: [], evidence_strength: "Low" });
+        const buys = rows.filter(r => r.signal.includes("BUY")).length;
+        const sells = rows.filter(r => r.signal.includes("SELL")).length;
+        const watch = rows.filter(r => r.signal === "HOLD / WATCH").length;
+        body.innerHTML = `
+          <div class="dash-grid">
+            ${mktStat("Buy candidates", buys, "of " + rows.length)}${mktStat("Hold / Watch", watch, "of " + rows.length)}${mktStat("Sell / Reduce", sells, "of " + rows.length)}${mktStat("Universe", rows.length, "stocks")}
+          </div>
+          <div class="table-wrap" style="margin-top:16px"><table class="tbl"><thead><tr><th>Symbol</th><th>Name</th><th>Signal</th><th>Confidence</th><th>Evidence</th><th></th></tr></thead><tbody>
+          ${rows.map(r => '<tr data-sym="' + esc(r.symbol) + '" style="cursor:pointer"><td><b>' + esc(r.symbol) + '</b></td><td>' + esc(r.name) + '</td><td><span class="badge ' + sigClass(r.signal) + '">' + esc(r.signal) + '</span></td><td>' + r.confidence + '%</td><td>' + r.evidence_strength + '</td><td><button class="btn btn-sm btn-soft" data-open="' + esc(r.symbol) + '">Analyze</button></td></tr>').join("")}
+          </tbody></table></div>
+          <div class="muted small" style="margin-top:10px">Composite signals combine trend, momentum, volume, fundamentals and sentiment. No single indicator drives a signal.</div>`;
+        $$("#mktBody [data-open]").forEach(b => b.addEventListener("click", e => { e.stopPropagation(); navigate("market/stock/" + encodeURIComponent(b.dataset.open)); }));
+        $$("#mktBody tr[data-sym]").forEach(tr => tr.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(tr.dataset.sym))));
+      });
+    }).catch(e => { body.innerHTML = mktError(e); });
+  }
+
+  function mPortfolio(body) {
+    body.innerHTML = mktLoading();
+    Promise.allSettled([window.MarketClient.paperPortfolio(), window.MarketClient.portfolioRisk()]).then(([p, r]) => {
+      if (p.status !== "fulfilled") { body.innerHTML = mktError(p.reason); return; }
+      const pf = p.value, risk = r.status === "fulfilled" ? r.value : null;
+      body.innerHTML = `
+        <div class="dash-grid">
+          ${mktStat("Total value", fmtInr(pf.total_value), "P&L " + (pf.pnl >= 0 ? "+" : "") + fmtInr(pf.pnl))}
+          ${mktStat("Cash", fmtInr(pf.cash), "exposure " + pf.exposure_pct + "%")}
+          ${mktStat("Positions", pf.positions.length, "paper mode")}
+          ${mktStat("Realized P&L", fmtInr(pf.realized_pnl), "win rate " + pf.win_rate_pct + "%")}
+        </div>
+        ${risk ? '<div class="card" style="margin-top:16px"><div class="card-title">Risk snapshot</div>' +
+          '<div class="row" style="flex-wrap:wrap;gap:10px">' +
+          mktStat("Exposure", risk.exposure_pct + "%", "of capital") +
+          mktStat("Top sector", risk.top_sector, risk.top_sector_pct + "%") +
+          mktStat("Max position", risk.max_position_pct + "%", "single") +
+          '</div>' + risk.flags.map(f => '<div class="insight" style="margin-top:6px"><span class="ic">⚠️</span><span>' + esc(f) + '</span></div>').join("") + '</div>' : ""}
+        <div class="card" style="margin-top:16px"><div class="card-title">Positions</div>
+          <table class="tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Price</th><th>Value</th><th>Unrealized</th><th>Stop</th></tr></thead><tbody>
+          ${pf.positions.map(pos => '<tr><td><b>' + esc(pos.symbol) + '</b></td><td>' + pos.quantity + '</td><td>' + fmtNum(pos.entry, 2) + '</td><td>' + fmtNum(pos.price, 2) + '</td><td>' + fmtInr(pos.value) + '</td><td class="' + (pos.unrealized_pnl >= 0 ? "up" : "down") + '">' + (pos.unrealized_pnl >= 0 ? "+" : "") + fmtInr(pos.unrealized_pnl) + '</td><td>' + fmtNum(pos.stop_loss, 2) + '</td></tr>').join("") || '<tr><td colspan="7" class="muted">No open positions.</td></tr>'}
+          </tbody></table>
+        </div>`;
+    });
+  }
+
+  function mPaper(body) {
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Execute a paper trade (simulated — no real money)</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Symbol</label><input id="ppSym" placeholder="e.g. TCS"></div>
+          <div class="field grow" style="margin:0"><label>Quantity</label><input type="number" id="ppQty" value="10" min="1"></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="ppBuy">Buy</button></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn" id="ppSell">Sell</button></div>
+        </div>
+        <div class="hint" style="margin-top:10px">Orders execute at the current quoted demo price. Capital starts at ₹1,000,000.</div>
+      </div>
+      <div id="ppBody" style="margin-top:16px"></div>`;
+    const render = () => {
+      const b = $("#ppBody");
+      b.innerHTML = mktLoading();
+      window.MarketClient.paperPortfolio().then(pf => {
+        b.innerHTML = `
+          <div class="dash-grid">
+            ${mktStat("Cash", fmtInr(pf.cash), "")}
+            ${mktStat("Total value", fmtInr(pf.total_value), "P&L " + (pf.pnl >= 0 ? "+" : "") + fmtInr(pf.pnl))}
+            ${mktStat("Positions", pf.positions.length, "open")}
+            ${mktStat("Return", fmtPct(pf.return_pct), "all-time")}
+          </div>
+          <div class="grid-2" style="margin-top:16px">
+            <div class="card"><div class="card-title">Open positions</div>
+              <table class="tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Price</th><th>Value</th><th>P&L</th></tr></thead><tbody>
+              ${pf.positions.map(pos => '<tr><td><b>' + esc(pos.symbol) + '</b></td><td>' + pos.quantity + '</td><td>' + fmtNum(pos.entry, 2) + '</td><td>' + fmtNum(pos.price, 2) + '</td><td>' + fmtInr(pos.value) + '</td><td class="' + (pos.unrealized_pnl >= 0 ? "up" : "down") + '">' + (pos.unrealized_pnl >= 0 ? "+" : "") + fmtInr(pos.unrealized_pnl) + '</td></tr>').join("") || '<tr><td colspan="6" class="muted">No open positions.</td></tr>'}
+              </tbody></table>
+            </div>
+            <div class="card"><div class="card-title">Trade history</div>
+              <table class="tbl"><thead><tr><th>Time</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>P&L</th></tr></thead><tbody>
+              ${pf.trades.slice().reverse().slice(0, 12).map(t => '<tr><td class="muted small">' + esc(t.time) + '</td><td><span class="badge ' + (t.type === "BUY" ? "ok" : "err") + '">' + t.type + '</span></td><td><b>' + esc(t.symbol) + '</b></td><td>' + t.quantity + '</td><td>' + fmtNum(t.price, 2) + '</td><td>' + (t.pnl ? fmtInr(t.pnl) : "—") + '</td></tr>').join("") || '<tr><td colspan="6" class="muted">No trades yet.</td></tr>'}
+              </tbody></table>
+            </div>
+          </div>`;
+      }).catch(e => { b.innerHTML = mktError(e); });
+    };
+    const act = (side) => {
+      const sym = $("#ppSym").value.trim().toUpperCase();
+      const qty = parseInt($("#ppQty").value, 10);
+      if (!sym || !qty || qty < 1) { toast("Paper trade", "Enter a symbol and quantity.", "err"); return; }
+      const fn = side === "buy" ? window.MarketClient.paperBuy : window.MarketClient.paperSell;
+      fn(sym, qty).then(r => { toast("Paper trade", r.status + " — " + r.symbol + " x " + r.quantity, "ok"); mktAudit("PAPER " + side.toUpperCase() + " " + sym + " x " + qty); render(); $("#ppSym").value = ""; }).catch(e => toast("Paper trade", e.message, "err"));
+    };
+    $("#ppBuy").addEventListener("click", () => act("buy"));
+    $("#ppSell").addEventListener("click", () => act("sell"));
+    render();
+  }
+
+  function mBacktest(body) {
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Strategy backtest (EMA + RSI on demo data)</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Symbol</label><input id="btSym" value="RELIANCE"></div>
+          <div class="field grow" style="margin:0"><label>Stop loss %</label><input type="number" id="btStop" value="8" min="1" max="40"></div>
+          <div class="field grow" style="margin:0"><label>Target % (optional)</label><input type="number" id="btTarget" value=""></div>
+          <div class="field grow" style="margin:0"><label>Sessions</label><input type="number" id="btDays" value="500" min="60" max="750"></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="btRun">Run backtest</button></div>
+        </div>
+        <div class="hint" style="margin-top:10px">Backtests use deterministic demo data. Past performance does not guarantee future results.</div>
+      </div>
+      <div id="btBody" style="margin-top:16px"></div>`;
+    const run = () => {
+      const b = $("#btBody");
+      b.innerHTML = mktLoading();
+      window.MarketClient.backtest($("#btSym").value.trim().toUpperCase(), {
+        stop_loss_pct: parseFloat($("#btStop").value) || 8,
+        target_pct: $("#btTarget").value ? parseFloat($("#btTarget").value) : undefined,
+        days: parseInt($("#btDays").value, 10) || 500,
+      }).then(r => {
+        mktAudit("BACKTEST " + r.symbol + " -> " + r.total_return_pct + "% (" + r.n_trades + " trades)");
+        b.innerHTML = `
+          <div class="dash-grid">
+            ${mktStat("Total return", fmtPct(r.total_return_pct), "CAGR " + fmtPct(r.cagr_pct))}
+            ${mktStat("Max drawdown", fmtPct(r.max_drawdown_pct), "")}
+            ${mktStat("Sharpe", r.sharpe, "Sortino " + r.sortino)}
+            ${mktStat("Trades", r.n_trades, "win rate " + r.win_rate_pct + "%")}
+          </div>
+          <div class="grid-2" style="margin-top:16px">
+            <div class="card"><div class="card-title">Equity curve (₹100 start)</div><div style="height:140px">${sparkSvg(r.equity_curve, 380, 120)}</div></div>
+            <div class="card"><div class="card-title">Strategy quality</div>
+              <div class="badge ${r.strategy_quality.grade === "Good" ? "ok" : r.strategy_quality.grade === "Poor" ? "err" : "wait"}" style="font-size:14px;padding:6px 12px">Grade: ${r.strategy_quality.grade}</div>
+              <div class="card-sub" style="margin-top:10px">${esc(r.strategy_quality.reason)}</div>
+              <div class="row small muted" style="margin-top:10px"><span>Profit factor ${r.profit_factor}</span><span class="grow"></span><span>Avg trade ${fmtPct(r.avg_trade_pct)}</span><span>Risk/reward ${r.risk_reward}</span></div>
+            </div>
+          </div>
+          <div class="card" style="margin-top:16px"><div class="card-title">Setup</div>
+            <div class="row small muted" style="gap:14px;flex-wrap:wrap"><span>Entry: ${esc(r.entry_rule)}</span><span>Exit: ${esc(r.exit_rule)}</span><span>Stop: ${r.stop_loss_pct}%</span><span>Target: ${r.target_pct ? r.target_pct + "%" : "none"}</span><span>Days: ${r.days}</span></div>
+            <div class="muted small" style="margin-top:10px">${esc(r.disclaimer)}</div>
+          </div>`;
+      }).catch(e => { b.innerHTML = mktError(e); });
+    };
+    $("#btRun").addEventListener("click", run);
+    run();
+  }
+
+  function mRisk(body) {
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Position size calculator — max risk ÷ stop distance</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Symbol</label><input id="rkSym" value="RELIANCE"></div>
+          <div class="field grow" style="margin:0"><label>Capital (₹)</label><input type="number" id="rkCap" value="500000" min="1000"></div>
+          <div class="field grow" style="margin:0"><label>Risk per trade %</label><input type="number" id="rkRisk" value="2" min="0.1" max="10" step="0.1"></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="rkRun">Size position</button></div>
+        </div>
+        <div class="hint" style="margin-top:10px">Position size = (capital × risk%) ÷ (price × stop distance%). This caps the max loss on the trade.</div>
+      </div>
+      <div id="rkBody" style="margin-top:16px"></div>`;
+    const run = () => {
+      const b = $("#rkBody");
+      b.innerHTML = mktLoading();
+      window.MarketClient.positionSize($("#rkSym").value.trim().toUpperCase(), parseFloat($("#rkCap").value) || 500000, parseFloat($("#rkRisk").value) || 2).then(r => {
+        b.innerHTML = `
+          <div class="dash-grid">
+            ${mktStat("Position size", r.max_quantity + " units", "notional " + fmtInr(r.notional))}
+            ${mktStat("Max risk", fmtInr(r.max_risk), r.risk_per_trade_pct + "% of capital")}
+            ${mktStat("Stop loss", fmtNum(r.stop_loss_price, 2), r.stop_distance_pct + "% below price")}
+            ${mktStat("Price", fmtNum(r.price, 2), "")}
+          </div>
+          <div class="card" style="margin-top:16px"><div class="insight" style="margin:0"><span class="ic">🧮</span><span>${esc(r.explanation)}</span></div>
+          <div class="muted small" style="margin-top:8px">Always confirm stop placement and regime (scale risk down in Bear / high-volatility markets) before acting.</div></div>`;
+      }).catch(e => { b.innerHTML = mktError(e); });
+    };
+    $("#rkRun").addEventListener("click", run);
+    run();
+  }
+
+  function mAlerts(body) {
+    const rules = JSON.parse(localStorage.getItem("acc-alerts") || "[]");
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Alert rules</div>
+        <div class="row" style="flex-wrap:wrap;gap:12px">
+          <div class="field grow" style="margin:0"><label>Symbol</label><input id="alSym" placeholder="e.g. TCS"></div>
+          <div class="field grow" style="margin:0"><label>Rule</label><select id="alRule">
+            <option value="signal_buy">Signal becomes BUY candidate</option>
+            <option value="score_70">AI score ≥ 70</option>
+            <option value="signal_sell">Signal becomes SELL / REDUCE</option>
+          </select></div>
+          <div class="field" style="margin:0"><label>&nbsp;</label><button class="btn btn-primary" id="alAdd">Add rule</button></div>
+        </div>
+      </div>
+      <div id="alList" style="margin-top:16px"></div>`;
+    const render = () => {
+      const list = $("#alList");
+      if (!rules.length) { list.innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">🚨</div><h3>No alert rules</h3><p>Add rules to get notified about signal changes and scores.</p></div>'; return; }
+      list.innerHTML = '<div class="grid-cards">' + rules.map((r, i) => '<div class="card"><div class="spread"><b>' + esc(r.symbol) + '</b><span class="badge">' + esc(r.rule) + '</span></div><div class="card-sub" style="margin-top:6px">Watch for ' + esc(r.rule.replace(/_/g, " ")) + '</div><div class="row" style="margin-top:10px"><button class="btn btn-sm btn-ghost" data-rm="' + i + '">Remove</button></div></div>').join("") + '</div>';
+      $$("#alList [data-rm]").forEach(b => b.addEventListener("click", () => { rules.splice(+b.dataset.rm, 1); localStorage.setItem("acc-alerts", JSON.stringify(rules)); render(); }));
+    };
+    $("#alAdd").addEventListener("click", () => {
+      const sym = $("#alSym").value.trim().toUpperCase();
+      if (!sym) { toast("Alert", "Enter a symbol.", "err"); return; }
+      rules.push({ symbol: sym, rule: $("#alRule").value });
+      localStorage.setItem("acc-alerts", JSON.stringify(rules));
+      toast("Alert", "Rule added for " + sym + ".", "ok");
+      $("#alSym").value = "";
+      render();
+    });
+    render();
+  }
+
+  function mJournal(body) {
+    body.innerHTML = mktLoading();
+    window.MarketClient.paperPortfolio().then(pf => {
+      body.innerHTML = `
+        <div class="dash-grid">
+          ${mktStat("Trades", pf.trades.length, "all-time")}
+          ${mktStat("Realized P&L", fmtInr(pf.realized_pnl), "")}
+          ${mktStat("Win rate", pf.win_rate_pct + "%", "paper")}
+          ${mktStat("Positions closed", pf.trades.filter(t => t.type === "SELL").length, "sells")}
+        </div>
+        <div class="card" style="margin-top:16px"><div class="card-title">Trade journal</div>
+          <table class="tbl"><thead><tr><th>Time</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>P&L</th></tr></thead><tbody>
+          ${pf.trades.slice().reverse().map(t => '<tr><td class="muted small">' + esc(t.time) + '</td><td><span class="badge ' + (t.type === "BUY" ? "ok" : "err") + '">' + t.type + '</span></td><td><b>' + esc(t.symbol) + '</b></td><td>' + t.quantity + '</td><td>' + fmtNum(t.price, 2) + '</td><td class="' + (t.pnl > 0 ? "up" : t.pnl < 0 ? "down" : "") + '">' + (t.pnl ? (t.pnl > 0 ? "+" : "") + fmtInr(t.pnl) : "—") + '</td></tr>').join("") || '<tr><td colspan="6" class="muted">No trades logged yet — use Paper Trading.</td></tr>'}
+          </tbody></table>
+        </div>`;
+    }).catch(e => { body.innerHTML = mktError(e); });
+  }
+
+  function mMonitoring(body) {
+    body.innerHTML = mktLoading();
+    Promise.allSettled([window.MarketClient.status(), window.MarketClient.quote("TCS"), window.MarketClient.score("TCS"), window.MarketClient.signal("TCS")]).then(([st, q, sc, sg]) => {
+      if (st.status !== "fulfilled") { body.innerHTML = mktError(st.reason); return; }
+      const s = st.value, quote = q.status === "fulfilled" ? q.value : null, score = sc.status === "fulfilled" ? sc.value : null, sig = sg.status === "fulfilled" ? sg.value : null;
+      body.innerHTML = `
+        <div class="card"><div class="card-title">Data provider</div>
+          <div class="row small" style="gap:12px;flex-wrap:wrap"><span class="badge ok">● ${esc(s.provider)}</span><span class="badge wait">${esc(s.data)}</span><span class="badge">${esc(s.mode)}</span></div>
+          <div class="muted small" style="margin-top:8px">Updated: ${esc(s.updated)}</div>
+        </div>
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">Sample quote integrity (TCS)</div>
+            ${quote ? '<div class="row small muted"><span>Price ${fmtNum(quote.price, 2)}</span><span class="grow"></span><span>Source: ${esc(quote.source)}</span></div><div class="muted small" style="margin-top:6px">Quality: ${esc(quote.quality)} · ${esc(quote.timestamp)}</div>' : '<div class="muted small">Unavailable.</div>'}
+          </div>
+          <div class="card"><div class="card-title">Model versions</div>
+            <div class="row small muted" style="gap:10px;flex-wrap:wrap">
+              ${score ? '<span class="badge">score: ' + esc(score.model) + '</span>' : ""}
+              ${sig ? '<span class="badge">signal: ' + esc(sig.model) + '</span>' : ""}
+              <span class="badge">data: demo-mock</span>
+            </div>
+            <div class="muted small" style="margin-top:8px">Score transparency: every factor is shown with evidence, so results are auditable.</div>
+          </div>
+        </div>`;
+    });
+  }
+
+  function mAudit(body) {
+    const log = JSON.parse(localStorage.getItem("acc-audit") || "[]");
+    body.innerHTML = `
+      <div class="card"><div class="card-title">Action audit log</div>
+        <div class="row" style="gap:10px"><span class="muted small">Actions you take in Market AI are logged here for transparency.</span><span class="grow"></span><button class="btn btn-ghost btn-sm" id="audClear">Clear log</button></div>
+        <table class="tbl" style="margin-top:10px"><thead><tr><th>Time</th><th>Action</th></tr></thead><tbody>
+        ${log.slice().reverse().map(e => '<tr><td class="muted small">' + esc(e.t) + '</td><td>' + esc(e.a) + '</td></tr>').join("") || '<tr><td colspan="2" class="muted">No actions logged yet.</td></tr>'}
+        </tbody></table>
+      </div>`;
+    $("#audClear").addEventListener("click", () => { localStorage.setItem("acc-audit", "[]"); render(); toast("Audit", "Log cleared.", "warn"); });
+  }
+  function mktAudit(action) {
+    const log = JSON.parse(localStorage.getItem("acc-audit") || "[]");
+    log.push({ t: new Date().toLocaleString(), a: action });
+    localStorage.setItem("acc-audit", JSON.stringify(log.slice(-100)));
   }
 
   /* ---------------- Conversation resume ---------------- */

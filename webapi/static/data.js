@@ -16,6 +16,8 @@ window.AppData = (() => {
     { key: "marketing",   label: "Marketing",          icon: "📣", tag: "Campaigns",           desc: "Draft campaign copy, research channels and plan outreach.", caps: ["Copy", "Research", "Plans"], status: "ready" },
     { key: "docs",        label: "Documents",          icon: "📄", tag: "Docs & PDFs",         desc: "Generate, edit and manage documents, reports and presentations.", caps: ["Reports", "PDF", "DOCX"], status: "ready" },
     { key: "coach",       label: "Personal Coach",     icon: "🎯", tag: "Growth",              desc: "Set goals, track habits and get structured guidance.", caps: ["Goals", "Habits", "Notes"], status: "ready" },
+    { key: "market",      label: "Market Intelligence",icon: "📈", tag: "Markets",             desc: "Indices, quotes, composite signals, regimes, screening and paper trading on demo data.", caps: ["Indices", "Signals", "Screener", "News"], status: "ready" },
+    { key: "risk",        label: "Risk & Position Sizing", icon: "🛡️", tag: "Risk",           desc: "Size positions from risk per trade and stress-test portfolio exposure and concentration.", caps: ["Sizing", "Exposure", "Concentration"], status: "ready" },
   ];
 
   const conversations = [
@@ -25,6 +27,7 @@ window.AppData = (() => {
     { id: "c4", title: "Marketing campaign ideas", agent: "marketing", updated: "Mon",      pinned: false, items: 6 },
     { id: "c5", title: "Q2 finance analysis", agent: "finance",     updated: "Sun",      pinned: false, items: 9 },
     { id: "c6", title: "Resume update 2026", agent: "jobsearch",   updated: "Jul 30",   pinned: false, items: 4 },
+    { id: "c7", title: "NIFTY regime + TCS signal", agent: "market", updated: "2h ago",  pinned: true,  items: 7 },
   ];
 
   const tasks = [
