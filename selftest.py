@@ -128,8 +128,15 @@ def main() -> int:
     html_msg["From"] = "noreply@example.com"
     html_msg["Subject"] = "Jobs"
     html_msg.set_content("<div><h1>Jobs</h1><p>Python Developer</p></div>", subtype="html")
-    from agents_core.gmail import _body_text
+    from agents_core.gmail import _body_text, _valid_id, _require_id
 
+    check("gmail rejects placeholder id", not _valid_id("<ID>"))
+    check("gmail accepts numeric id", _valid_id("4948"))
+    try:
+        _require_id("nope")
+        check("gmail requires numeric id", False, "no error raised")
+    except Exception:  # noqa: BLE001
+        check("gmail requires numeric id", True)
     body = _body_text(html_msg)
     check("gmail strips html-only body", "Python Developer" in body and "<div>" not in body, body)
     zw_msg = _email.EmailMessage()

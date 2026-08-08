@@ -461,8 +461,8 @@ JOBSEARCH_TOOLS: list[Tool] = [
 ]
 
 GMAIL_TOOLS: list[Tool] = [
-    Tool("gmail_inbox", "List recent inbox messages (IMAP query, default UNSEEN).", tool_gmail_inbox, {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}),
-    Tool("gmail_thread", "Read a full email thread by its id (from gmail_inbox).", tool_gmail_thread, {"type": "object", "properties": {"message_id": {"type": "string"}}, "required": ["message_id"]}),
-    Tool("gmail_draft", "Save a reply draft to a file for review (does not send).", tool_gmail_draft, {"type": "object", "properties": {"message_id": {"type": "string"}, "reply_body": {"type": "string"}}, "required": ["message_id", "reply_body"]}),
+    Tool("gmail_inbox", "List inbox messages. Use Gmail search syntax for query, e.g. 'from:linkedin.com subject:job is:unread'. Default query UNSEEN.", tool_gmail_inbox, {"type": "object", "properties": {"query": {"type": "string", "description": "Gmail search syntax, e.g. 'from:x subject:job is:unread'"}, "limit": {"type": "integer"}}}),
+    Tool("gmail_thread", "Read a full email thread by its numeric id (from gmail_inbox output).", tool_gmail_thread, {"type": "object", "properties": {"message_id": {"type": "string", "description": "numeric message id, e.g. '4948'"}}, "required": ["message_id"]}),
+    Tool("gmail_draft", "Save a reply draft to a file for review (does not send).", tool_gmail_draft, {"type": "object", "properties": {"message_id": {"type": "string", "description": "numeric message id from gmail_inbox"}, "reply_body": {"type": "string"}}, "required": ["message_id", "reply_body"]}),
     Tool("gmail_send", "SEND an email via Gmail. Only call after the user has explicitly approved the content.", tool_gmail_send, {"type": "object", "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["to", "subject", "body"]}),
 ]

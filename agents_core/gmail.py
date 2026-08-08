@@ -85,14 +85,50 @@ def _connect_imap() -> imaplib.IMAP4_SSL:
         raise ToolError(f"IMAP login failed: {exc}") from exc
 
 
+_IMAP_KEYWORDS = {
+    "ALL", "ANSWERED", "DELETED", "DRAFT", "FLAGGED", "NEW", "OLD", "RECENT",
+    "SEEN", "UNANSWERED", "UNDELETED", "UNDRAFT", "UNFLAGGED", "UNSEEN",
+}
+
+
+def _search(conn: imaplib.IMAP4_SSL, query: str, limit: int) -> list[bytes]:
+    """Run a search, returning message ids (most recent first).
+
+    Gmail-style queries ('from:x subject:y is:unread') go through the X-GM-RAW
+    extension so the model's natural search syntax works; plain IMAP keywords
+    (UNSEEN, ALL, ...) use the standard SEARCH command.
+    """
+    q = (query or "UNSEEN").strip()
+    try:
+        if q.upper() in _IMAP_KEYWORDS:
+            status, data = conn.search(None, q)
+        else:
+            raw = q.replace('"', "'")
+            status, data = conn.search(None, "X-GM-RAW", f'"{raw}"')
+    except imaplib.IMAP4.error as exc:
+        raise ToolError(f"gmail search failed for {q!r}: {exc}") from exc
+    if status != "OK" or not data or not data[0]:
+        return []
+    return data[0].split()[-int(limit):]
+
+
+def _valid_id(message_id: str) -> bool:
+    """IMAP message ids are plain integers; reject placeholders like '<id>'."""
+    return bool(message_id) and message_id.strip().isdigit()
+
+
+def _require_id(message_id: str) -> None:
+    if not _valid_id(message_id):
+        raise ToolError(
+            f"invalid message id: {message_id!r}. Use the numeric id from gmail_inbox output (e.g. '4948')."
+        )
+
+
 def inbox_list(query: str = "UNSEEN", limit: int = 10) -> str:
-    """Return a summary of the most recent messages matching an IMAP query."""
+    """Return a summary of the most recent messages matching a Gmail search query."""
     conn = _connect_imap()
     try:
-        status, data = conn.search(None, query or "UNSEEN")
-        if status != "OK" or not data or not data[0]:
-            return "(no messages matched the query)"
-        ids = data[0].split()[-int(limit):]
+        ids = _search(conn, query, limit)
         rows = []
         for num in ids:
             status, msg_data = conn.fetch(num, "(BODY.PEEK[HEADER])")
@@ -108,7 +144,7 @@ def inbox_list(query: str = "UNSEEN", limit: int = 10) -> str:
                 f"  subject: {_decode(msg.get('Subject', ''))}\n"
                 f"  msgid: {msg_id}"
             )
-        return "\n\n".join(rows) if rows else "(no readable messages)"
+        return "\n\n".join(rows) if rows else "(no messages matched the query)"
     finally:
         try:
             conn.logout()
@@ -118,9 +154,10 @@ def inbox_list(query: str = "UNSEEN", limit: int = 10) -> str:
 
 def read_thread(message_id: str, limit: int = 10) -> str:
     """Read the full body of a message by its IMAP id (use the id from inbox_list)."""
+    _require_id(message_id)
     conn = _connect_imap()
     try:
-        status, data = conn.fetch(message_id, "(BODY.PEEK[])")
+        status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[])")
         if status != "OK" or not data:
             return f"message not found: {message_id}"
         raw = data[0][1] if isinstance(data[0], tuple) else None
@@ -143,9 +180,10 @@ def read_thread(message_id: str, limit: int = 10) -> str:
 
 def draft_reply(message_id: str, reply_body: str) -> str:
     """Save a reply draft for a message as a text file for review before sending."""
+    _require_id(message_id)
     conn = _connect_imap()
     try:
-        status, data = conn.fetch(message_id, "(BODY.PEEK[HEADER])")
+        status, data = conn.fetch(message_id.strip(), "(BODY.PEEK[HEADER])")
         if status != "OK" or not data:
             return f"message not found: {message_id}"
         raw = data[0][1] if isinstance(data[0], tuple) else None
