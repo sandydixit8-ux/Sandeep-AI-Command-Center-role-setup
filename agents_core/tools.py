@@ -144,6 +144,8 @@ def _strip_html(text: str, max_chars: int = 6000) -> str:
 
     text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
+    # drop zero-width / invisible formatting chars injected by HTML emails
+    text = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n", text)
     return text.strip()[:max_chars]

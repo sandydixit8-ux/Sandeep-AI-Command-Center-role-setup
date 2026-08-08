@@ -13,6 +13,11 @@ tmp = tempfile.mkdtemp(prefix="agents_selftest_")
 os.environ["AGENT_LLM_PROVIDER"] = "mock"
 os.environ["AGENT_DATA_DIR"] = str(Path(tmp) / "data")
 os.environ["AGENT_OUTPUTS_DIR"] = str(Path(tmp) / "outputs")
+# Keep the suite offline: clear any real credentials from .env so the gmail/sheets
+# checks exercise the "not configured" paths deterministically.
+os.environ["AGENT_GMAIL_USER"] = ""
+os.environ["AGENT_GMAIL_APP_PASSWORD"] = ""
+os.environ["AGENT_GOOGLE_SERVICE_ACCOUNT_FILE"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -116,6 +121,20 @@ def main() -> int:
     check("gmail_inbox gives setup error", "error" in rg and "Gmail is not configured" in rg, rg)
     rg2 = execute_tool(GMAIL_TOOLS, "gmail_send", {"to": "a@b.com", "subject": "hi", "body": "hello"}, "exec")
     check("gmail_send blocked when unconfigured", "error" in rg2, rg2)
+
+    import email.message as _email
+
+    html_msg = _email.EmailMessage()
+    html_msg["From"] = "noreply@example.com"
+    html_msg["Subject"] = "Jobs"
+    html_msg.set_content("<div><h1>Jobs</h1><p>Python Developer</p></div>", subtype="html")
+    from agents_core.gmail import _body_text
+
+    body = _body_text(html_msg)
+    check("gmail strips html-only body", "Python Developer" in body and "<div>" not in body, body)
+    zw_msg = _email.EmailMessage()
+    zw_msg.set_content("Hiring\u200b\u200c\u200d\u2060\ufeff now")
+    check("gmail strips zero-width chars", "now" in _body_text(zw_msg), repr(_body_text(zw_msg)))
 
     print("\n== sheets tools (unconfigured) ==")
     rs2 = execute_tool(FINANCE_TOOLS, "sheets_push", {}, "finance")

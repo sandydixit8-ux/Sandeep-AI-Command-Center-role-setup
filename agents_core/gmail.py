@@ -17,7 +17,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 from .config import OUTPUTS_DIR, get_settings
-from .tools import ToolError
+from .tools import ToolError, _strip_html
 
 
 def _creds() -> tuple[str, str]:
@@ -46,17 +46,31 @@ def _decode(value: str) -> str:
 
 
 def _body_text(msg: email.message.Message, max_chars: int = 5000) -> str:
-    """Extract the plain-text body of an email message."""
+    """Extract the plain-text body of an email message.
+
+    Falls back to stripping an HTML body when no plain-text part exists (common
+    with marketing/alert emails), so agents don't read raw HTML.
+    """
     if msg.is_multipart():
+        html_parts: list[str] = []
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")[:max_chars]
+            ct = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            if ct == "text/plain":
+                return payload.decode(part.get_content_charset() or "utf-8", errors="replace")[:max_chars]
+            if ct == "text/html":
+                html_parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+        if html_parts:
+            return _strip_html(" ".join(html_parts), max_chars)
         return "(no plain-text body)"
     payload = msg.get_payload(decode=True)
     if payload:
-        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")[:max_chars]
+        text = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+        if msg.get_content_type() == "text/html":
+            return _strip_html(text, max_chars)
+        return text[:max_chars]
     return "(no body)"
 
 
