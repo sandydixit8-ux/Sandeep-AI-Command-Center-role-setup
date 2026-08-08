@@ -5,8 +5,8 @@
 (() => {
   "use strict";
 
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
   /* ---------------- Markdown (safe subset) ---------------- */
@@ -490,6 +490,16 @@
     } else if (state.runningConvId) {
       openConversation(state.runningConvId, true);
     }
+    // delegated timeline toggle (works after restore re-render too)
+    $("#chatScroll").addEventListener("click", e => {
+      const btn = e.target.closest(".tlToggle");
+      if (!btn) return;
+      const tl = btn.closest(".timeline");
+      const d = tl && tl.querySelector(".tlDetail");
+      if (!d) return;
+      d.classList.toggle("hidden");
+      btn.textContent = d.classList.contains("hidden") ? "Show details ▾" : "Hide details ▴";
+    });
     scrollChat();
   }
   function renderAgentSelector() {
@@ -520,7 +530,7 @@
       scroll.insertAdjacentHTML("beforeend",
         '<div class="msg user"><div class="avatar user">SA</div><div class="msg-body"><div class="msg-bubble">' + esc(m.text) + '</div><div class="msg-meta">' + time + '</div></div></div>');
     } else if (m.type === "timeline") {
-      scroll.insertAdjacentHTML("beforeend", '<div class="timeline" id="tl">' + m.html + '</div>');
+      scroll.insertAdjacentHTML("beforeend", '<div class="timeline" data-tl="1">' + timelineHtml(m.tl) + '</div>');
     } else if (m.type === "result") {
       scroll.insertAdjacentHTML("beforeend",
         '<div class="msg"><div class="avatar ai">✦</div><div class="msg-body"><div class="msg-bubble"><div class="md">' + mdToHtml(m.text) + '</div></div>' +
@@ -627,54 +637,72 @@
     bindResultActions();
   }
 
+  function timelineHtml(tl) {
+    const steps = tl.steps.map((s, i) =>
+      '<div class="tl-step ' + (i < tl.active ? "done" : i === tl.active ? "doing" : "pending") + '"><span class="tl-ic">' + (i < tl.active ? "✓" : i === tl.active ? "●" : "○") + '</span>' + s + '</div>').join("");
+    const tools = tl.tools.map(t =>
+      '<div class="tl-tool"><span class="tt-name">⚙ ' + esc(t.name) + '</span><span class="muted">' + esc(t.output || "completed") + '</span></div>').join("");
+    return '<div class="timeline-title">' + (tl.done ? "✅ Completed" : "⚙️ Working on your request") + '</div>' +
+      steps +
+      '<div class="tl-detail"><button class="btn btn-ghost btn-sm tlToggle">Show details ▾</button><div class="hidden tlDetail" style="margin-top:6px">' + tools + '</div></div>';
+  }
+
   function showTimeline(steps, active) {
     const scroll = $("#chatScroll");
     if (!scroll) return;
-    const html = '<div class="timeline-title">⚙️ Working on your request</div>' +
-      steps.map((s, i) =>
-        '<div class="tl-step ' + (i < active ? "done" : i === active ? "doing" : "pending") + '"><span class="tl-ic">' + (i < active ? "✓" : i === active ? "●" : "○") + '</span>' + s + '</div>').join("") +
-      '<div class="tl-detail"><button class="btn btn-ghost btn-sm" id="tlToggle">Show details ▾</button><div class="hidden" id="tlDetail" style="margin-top:6px"></div></div>';
-    state.chat.push({ role: "assistant", type: "timeline", html });
-    scroll.insertAdjacentHTML("beforeend", '<div class="timeline" id="tl">' + html + '</div>');
+    const tlMsg = { role: "assistant", type: "timeline", tl: { steps, active, tools: [], done: false } };
+    state.chat.push(tlMsg);
+    scroll.insertAdjacentHTML("beforeend", '<div class="timeline" data-tl="1">' + timelineHtml(tlMsg.tl) + '</div>');
     scrollChat();
-    $("#tlToggle").addEventListener("click", () => { const d = $("#tlDetail"); d.classList.toggle("hidden"); $("#tlToggle").textContent = d.classList.contains("hidden") ? "Show details ▾" : "Hide details ▴"; });
+  }
+  function currentTimeline() {
+    const scroll = $("#chatScroll");
+    if (!scroll) return null;
+    const tls = $$('.timeline[data-tl="1"]', scroll);
+    return tls.length ? tls[tls.length - 1] : null;
+  }
+  function currentTlMsg() {
+    for (let i = state.chat.length - 1; i >= 0; i--) {
+      if (state.chat[i] && state.chat[i].tl) return state.chat[i];
+    }
+    return null;
+  }
+  function refreshTimeline(tlMsg) {
+    const tl = currentTimeline();
+    if (!tl) return;
+    const detail = tl.querySelector(".tlDetail");
+    const wasOpen = detail && !detail.classList.contains("hidden");
+    tl.innerHTML = timelineHtml(tlMsg.tl);
+    if (wasOpen) {
+      const nd = tl.querySelector(".tlDetail");
+      const nb = tl.querySelector(".tlToggle");
+      if (nd && nb) { nd.classList.remove("hidden"); nb.textContent = "Hide details ▴"; }
+    }
   }
   function setTimelineStep(i, toolName) {
-    const tl = $("#tl");
-    if (!tl) return;
-    const steps = $$(".tl-step", tl);
-    steps.forEach((s, k) => {
-      s.className = "tl-step " + (k < i ? "done" : k === i ? "doing" : "pending");
-      s.querySelector(".tl-ic").textContent = k < i ? "✓" : k === i ? "●" : "○";
-    });
-    if (toolName) {
-      const detail = $("#tlDetail");
-      if (detail) {
-        const row = document.createElement("div");
-        row.className = "tl-tool";
-        row.innerHTML = '<span class="tt-name">⚙ ' + esc(toolName) + '</span><span class="muted">completed</span>';
-        detail.appendChild(row);
-      }
-    }
+    const tlMsg = currentTlMsg();
+    if (!tlMsg) return;
+    tlMsg.tl.active = i;
+    if (toolName && !tlMsg.tl.tools.some(t => t.name === toolName)) tlMsg.tl.tools.push({ name: toolName, output: "completed" });
+    refreshTimeline(tlMsg);
   }
   function setTimelineDone() {
-    const tl = $("#tl");
-    if (!tl) return;
-    $$(".tl-step", tl).forEach(s => { s.className = "tl-step done"; s.querySelector(".tl-ic").textContent = "✓"; });
-    const title = $(".timeline-title", tl);
-    if (title) title.textContent = "✅ Completed";
+    const tlMsg = currentTlMsg();
+    if (!tlMsg) return;
+    tlMsg.tl.done = true;
+    refreshTimeline(tlMsg);
   }
   function appendToolEvent(evt) {
-    const scroll = $("#chatScroll");
-    if (!scroll) return;
-    const detail = $("#tlDetail");
-    if (detail) {
-      const row = document.createElement("div");
-      row.className = "tl-tool";
-      const out = String(evt.output || "").slice(0, 180);
-      row.innerHTML = '<span class="tt-name">⚙ ' + esc(evt.name) + '</span><span class="muted">' + esc(out) + '</span>';
-      detail.appendChild(row);
+    const tlMsg = currentTlMsg();
+    if (!tlMsg) return;
+    const out = String(evt.output || "").slice(0, 180);
+    const existing = tlMsg.tl.tools.find(t => t.name === evt.name);
+    if (existing) {
+      if (existing.output === "completed") existing.output = out;
+    } else {
+      tlMsg.tl.tools.push({ name: evt.name, output: out });
     }
+    refreshTimeline(tlMsg);
   }
 
   function bindResultActions() {
