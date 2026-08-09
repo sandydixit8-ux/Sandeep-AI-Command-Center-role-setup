@@ -8,8 +8,8 @@ Schedule with Windows Task Scheduler (runs in the foreground once):
 
 Or add a daily/weekly trigger to Task Scheduler:
     Program:  C:\\Users\\Ats\\AppData\\Local\\Python\\bin\\python.exe
-    Arguments: "C:\\Users\\Ats\\OneDrive\\Documents\\Sandeep-AI-Command-Center-role-setup\\scripts\\scheduled_run.py" --finance
-    Start in: C:\\Users\\Ats\\OneDrive\\Documents\\Sandeep-AI-Command-Center-role-setup
+    Arguments: "C:\\Users\\Ats\\OneDrive\\Documents\\Sandeep-AI-Command-Center\\scripts\\scheduled_run.py" --finance
+    Start in: C:\\Users\\Ats\\OneDrive\\Documents\\Sandeep-AI-Command-Center
 """
 from __future__ import annotations
 
