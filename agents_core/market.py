@@ -36,6 +36,7 @@ from typing import Any, Protocol
 import httpx
 
 from .config import DATA_DIR
+from .safety import safety_gate
 
 # --------------------------------------------------------------------------- data
 
@@ -1027,6 +1028,7 @@ def _paper_gate(s: dict[str, Any]) -> None:
 
 
 def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target: float | None = None) -> dict[str, Any]:
+    safety_gate("paper_stock", f"BUY {symbol} x {quantity}")
     s = get_provider().get_stock(symbol)
     if not s:
         raise ValueError(f"unknown symbol: {symbol}")
@@ -1050,6 +1052,7 @@ def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target
 
 
 def paper_sell(symbol: str, quantity: int) -> dict[str, Any]:
+    safety_gate("paper_stock", f"SELL {symbol} x {quantity}")
     s = get_provider().get_stock(symbol)
     if not s:
         raise ValueError(f"unknown symbol: {symbol}")

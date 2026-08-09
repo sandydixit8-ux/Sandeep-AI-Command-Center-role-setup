@@ -37,6 +37,7 @@ from typing import Any, Protocol
 import httpx
 
 from .config import DATA_DIR
+from .safety import safety_gate
 
 # --------------------------------------------------------------------------- constants
 
@@ -1338,6 +1339,8 @@ class OptionsPaperEngine:
     def open(self, underlying: str, expiry: str, strike: float, option_type: str,
              action: str, quantity: int, entry_price: float,
              idempotency_key: str = "") -> OptionsPosition:
+        safety_gate("paper_option",
+                    f"{action} {quantity}x {underlying} {strike} {option_type} {expiry}")
         if idempotency_key:
             existing = self._find_by_idem(idempotency_key)
             if existing is not None:

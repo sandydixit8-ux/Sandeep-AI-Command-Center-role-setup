@@ -153,13 +153,14 @@ def phase0():
               "none", f"{len(hits)} keyword hits", "; ".join(sorted(set(hits))) or "clean")
     ok(r, len(hits) == 0)
 
-    # P0.2 env switch must not enable live trading silently
-    cfg_hit = "LIVE_TRADING" in src or "LIVE_BROKER" in src
-    r = check("P0.2", "P0.Environment", "config", "No implicit LIVE_TRADING_ENABLED switch",
-              "absent/disabled by default", f"found={cfg_hit}",
-              "config.py reads AGENT_* only; no LIVE_TRADING env var exists",
-              "P0")
-    ok(r, not cfg_hit)
+    # P0.2 live-trading switch must exist AND be fail-closed by default
+    gate_src = "safety_gate" in src and "live_order" in src
+    live_off = "LIVE_TRADING_ENABLED" in src
+    r = check("P0.2", "P0.Environment", "config",
+              "LIVE_TRADING_ENABLED switch exists and fails closed (not 'true' by default)",
+              "fail-closed", f"switch={live_off} gate={gate_src}",
+              "safety.py gate refuses live_order unless LIVE_TRADING_ENABLED=true", "P0")
+    ok(r, live_off and gate_src)
     r = check("P0.2b", "P0.Environment", "config", "Config must fail closed if environment ambiguous",
               "fail-on-unknown provider", "provider validated", "Settings() raises on unsupported provider",
               "P0")
@@ -192,6 +193,33 @@ def phase0():
               "tz-aware", f"refs={len(tz_hits)}", "; ".join(tz_hits[:6]) or "none",
               "P2")
     ok(r, len(tz_hits) > 0)
+
+    # P0.7 runtime execution gate: live blocked by default, kill switch blocks even paper
+    gate_ok = {"live_blocked": False, "kill_blocks": False, "paper_ok": False, "audit_log": False}
+    try:
+        import agents_core.safety as sf
+        from agents_core.safety import ExecutionBlockedError
+        try:
+            sf.safety_gate("live_order", "probe")
+        except ExecutionBlockedError:
+            gate_ok["live_blocked"] = True
+        try:
+            os.environ["AGENT_KILL_SWITCH"] = "1"
+            sf.safety_gate("paper_stock", "probe")
+        except ExecutionBlockedError:
+            gate_ok["kill_blocks"] = True
+        finally:
+            os.environ.pop("AGENT_KILL_SWITCH", None)
+        sf.safety_gate("paper_stock", "probe")
+        gate_ok["paper_ok"] = True
+        gate_ok["audit_log"] = (Path(os.environ["AGENT_DATA_DIR"]) / "execution_audit.jsonl").exists()
+    except Exception as exc:  # noqa: BLE001
+        gate_ok["err"] = str(exc)
+    r = check("P0.7", "P0.Environment", "safety_gate",
+              "Runtime safety gate: live blocked, kill switch blocks paper, paper allowed",
+              "enforced", str(gate_ok),
+              "agents_core/safety.py single gate; audit log written", "P0")
+    ok(r, gate_ok["live_blocked"] and gate_ok["kill_blocks"] and gate_ok["paper_ok"] and gate_ok["audit_log"])
 
 
 def _git_tracked(name: str) -> bool:
