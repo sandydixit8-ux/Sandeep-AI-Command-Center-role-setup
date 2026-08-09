@@ -988,10 +988,49 @@ def paper_portfolio() -> dict[str, Any]:
     return st
 
 
+def _quote_age_hours(s: dict[str, Any]) -> float | None:
+    """Best-effort age in hours of a quote from its timestamp; None if unparseable."""
+    ts = (s or {}).get("timestamp", "")
+    if not ts:
+        return None
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00").replace("T", " "))
+            dt = dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except ValueError:
+            return None
+    age = (datetime.now() - dt).total_seconds()
+    return max(0.0, age) / 3600.0
+
+
+MAX_QUOTE_AGE_HOURS = 72.0
+
+
+def _fresh_quote(s: dict[str, Any], max_age: float = MAX_QUOTE_AGE_HOURS) -> tuple[bool, str]:
+    """Paper-trading freshness gate: refuse stale/unparseable quotes (fail-closed)."""
+    if not s:
+        return False, "no quote available"
+    age = _quote_age_hours(s)
+    if age is None:
+        return False, "quote timestamp unavailable"
+    if age > max_age:
+        return False, f"quote {age:.1f} hours old exceeds {max_age:g}-h limit"
+    return True, f"quote {age:.2f} hours old"
+
+
+def _paper_gate(s: dict[str, Any]) -> None:
+    fresh, why = _fresh_quote(s)
+    if not fresh:
+        raise ValueError(f"paper trade refused (fail-closed): {why}")
+
+
 def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target: float | None = None) -> dict[str, Any]:
     s = get_provider().get_stock(symbol)
     if not s:
         raise ValueError(f"unknown symbol: {symbol}")
+    _paper_gate(s)
     st = _load_paper()
     price = s["price"]
     cost = price * quantity
@@ -1014,6 +1053,7 @@ def paper_sell(symbol: str, quantity: int) -> dict[str, Any]:
     s = get_provider().get_stock(symbol)
     if not s:
         raise ValueError(f"unknown symbol: {symbol}")
+    _paper_gate(s)
     st = _load_paper()
     pos = next((p for p in st["positions"] if p["symbol"] == s["symbol"]), None)
     if not pos or pos["quantity"] < quantity:

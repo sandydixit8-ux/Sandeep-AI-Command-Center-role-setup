@@ -62,12 +62,18 @@ def _resolve_read_path(path: str) -> Path:
         _safe_path(str(p), OUTPUTS_DIR)
         _safe_path(str(p), DATA_DIR)
         _safe_path(str(p), BASE_DIR.parent)
-        return p.resolve()
+        cand = p.resolve()
+        _deny_sensitive(cand)
+        return cand
     for root in (OUTPUTS_DIR, DATA_DIR, BASE_DIR.parent):
         candidate = root / _strip_root_prefix(path, root)
         if candidate.is_file():
+            _deny_sensitive(candidate)
             return candidate
-    return (BASE_DIR.parent / p).resolve()
+    fallback = (BASE_DIR.parent / p).resolve()
+    if fallback.is_file():
+        _deny_sensitive(fallback)
+    return fallback
 
 
 def _outputs_path(path: str) -> Path:
@@ -205,11 +211,29 @@ def _tool_result(value: Any) -> str:
         return str(value)
 
 
-# ---- Memory tools (per-agent notes, persisted as JSON) ----
+# ---- Memory tools (per-agent notes, stored as JSON) ----
+
+_SENSITIVE_BASENAMES = (".env",)
+_SENSITIVE_PREFIXES = (".env.",)
+
+def _clean_agent_name(agent: str) -> str:
+    """Normalise an agent name so it can never influence the path (no traversal)."""
+    import re
+
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]", "_", str(agent))
+    cleaned = cleaned.replace("..", "_").strip("._") or "agent"
+    return cleaned[:64]
+
+
+def _deny_sensitive(path: Path) -> None:
+    """Reject reads of credential-like files (e.g. .env) wherever they resolve."""
+    name = path.name
+    if name in _SENSITIVE_BASENAMES or name.startswith(_SENSITIVE_PREFIXES):
+        raise ToolError(f"reading {name!r} is not allowed")
 
 
 def _memory_file(agent: str) -> Path:
-    return DATA_DIR / f"{agent}_memory.json"
+    return DATA_DIR / f"{_clean_agent_name(agent)}_memory.json"
 
 
 def _load_memory(agent: str) -> dict[str, Any]:
@@ -251,6 +275,14 @@ def _ensure_ledger() -> None:
         p.write_text("date,type,category,description,amount\n", encoding="utf-8")
 
 
+def _csv_cell(value: str) -> str:
+    """Sanitise a CSV cell so it cannot inject spreadsheet formulas (=, +, -, @, tab, CR)."""
+    v = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if v.startswith(("=", "+", "-", "@", "\t")):
+        v = "'" + v
+    return v
+
+
 def tool_ledger_add(amount: float, category: str, description: str, type: str = "expense", date: str = "") -> str:
     """Record a transaction. type is 'income' or 'expense'. date is YYYY-MM-DD (defaults to today)."""
     if type not in ("income", "expense"):
@@ -263,7 +295,7 @@ def tool_ledger_add(amount: float, category: str, description: str, type: str = 
         raise ToolError("amount must be greater than zero")
     _ensure_ledger()
     date = date or datetime.now().strftime("%Y-%m-%d")
-    row = f"{date},{type},{category},{description.replace(',', ' ').strip()},{amount:.2f}\n"
+    row = f"{_csv_cell(date)},{_csv_cell(type)},{_csv_cell(category)},{_csv_cell(description)},{amount:.2f}\n"
     with _ledger_path().open("a", encoding="utf-8") as fh:
         fh.write(row)
     return f"recorded {type} of {amount:.2f} ({category}): {description} on {date}"
@@ -361,6 +393,7 @@ def _read_tool_input(value: str) -> str:
     for root in (BASE_DIR.parent, DATA_DIR, OUTPUTS_DIR):
         candidate = root / _strip_root_prefix(value, root)
         if candidate.is_file() and candidate.stat().st_size <= 200_000:
+            _deny_sensitive(candidate)
             if candidate.suffix.lower() == ".pdf":
                 from .pdfutil import pdf_to_text
 

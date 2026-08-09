@@ -1306,6 +1306,7 @@ class OptionsPosition:
     exit_price: float | None = None
     exited_at: str | None = None
     pnl: float = 0.0
+    idempotency_key: str = ""
 
 
 class OptionsPaperEngine:
@@ -1331,12 +1332,21 @@ class OptionsPaperEngine:
             encoding="utf-8",
         )
 
+    def _find_by_idem(self, key: str) -> OptionsPosition | None:
+        return next((p for p in self._positions if p.idempotency_key == key), None)
+
     def open(self, underlying: str, expiry: str, strike: float, option_type: str,
-             action: str, quantity: int, entry_price: float) -> OptionsPosition:
+             action: str, quantity: int, entry_price: float,
+             idempotency_key: str = "") -> OptionsPosition:
+        if idempotency_key:
+            existing = self._find_by_idem(idempotency_key)
+            if existing is not None:
+                return existing
         pos = OptionsPosition(
             id=f"PP{int(time.time()*1000)}",
             underlying=underlying, expiry=expiry, strike=strike,
             option_type=option_type, action=action, quantity=quantity,
+            idempotency_key=idempotency_key,
             entry_price=entry_price, entered_at=_now_str(),
         )
         self._positions.append(pos)
