@@ -9,14 +9,21 @@ Endpoints:
     GET  /api/v1/market/*            market intelligence (indices, quotes, analysis, risk)
 
 Each request gets a fresh agent instance (stateless), so concurrent calls are safe.
+
+Auth (defense in depth): if the environment variable AGENT_API_TOKEN is set,
+every /api/* route requires it (via `Authorization: Bearer <token>` or the
+`X-API-Key` header). If it is unset the API stays open (single-user, localhost
+default). /, /health and /static are never gated.
 """
 from __future__ import annotations
 
+import hmac
 import json
+import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -29,6 +36,27 @@ from agents_core import options_intel as intel_mod
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="Sandeep AI Command Center", version="0.5.0")
+
+
+def _api_token() -> str:
+    return (os.environ.get("AGENT_API_TOKEN") or "").strip()
+
+
+def _supplied_key(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[len("bearer "):].strip()
+    return request.headers.get("X-API-Key", "").strip()
+
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    token = _api_token()
+    if token and request.url.path.startswith("/api/"):
+        provided = _supplied_key(request)
+        if not provided or not hmac.compare_digest(provided, token):
+            return JSONResponse(status_code=401, content={"detail": "missing or invalid API key"})
+    return await call_next(request)
 
 
 class RunRequest(BaseModel):

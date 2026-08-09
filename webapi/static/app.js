@@ -573,9 +573,12 @@
     showTimeline(steps, 0);
     setTimeout(() => setTimelineStep(1), 400);
 
+    const apiHeaders = { "Content-Type": "application/json" };
+    const tok = window.API_TOKEN || (localStorage && localStorage.getItem("api_token")) || "";
+    if (tok) apiHeaders["X-API-Key"] = tok;
     fetch("/api/v1/run/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders,
       body: JSON.stringify({ agent, task }),
     }).then(res => {
       if (!res.ok || !res.body) throw new Error("Request failed (" + res.status + ")");
@@ -2008,7 +2011,10 @@
         ? '<span class="badge ok">IV ' + (c.iv_change_pct >= 0 ? "+" : "") + c.iv_change_pct + '% Δ</span>'
         : '<span class="badge wait">Crush —</span>';
 
-    fetch(url).then(r => r.ok ? r.json() : Promise.reject(new Error("intel " + r.status))).then(d => {
+    const _hdr = {};
+    const _tok = window.API_TOKEN || (localStorage && localStorage.getItem("api_token")) || "";
+    if (_tok) _hdr["X-API-Key"] = _tok;
+    fetch(url, { headers: _hdr }).then(r => r.ok ? r.json() : Promise.reject(new Error("intel " + r.status))).then(d => {
       holder.innerHTML = `
         <div class="mkt-banner">
           <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">

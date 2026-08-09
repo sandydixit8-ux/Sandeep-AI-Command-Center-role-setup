@@ -7,8 +7,15 @@ window.MarketClient = (() => {
 
   const BASE = "/api/v1";
 
+  function authHeaders(extra) {
+    const token = window.API_TOKEN || (localStorage && localStorage.getItem("api_token")) || "";
+    const h = { ...(extra || {}) };
+    if (token) h["X-API-Key"] = token;
+    return h;
+  }
+
   async function get(path) {
-    const res = await fetch(BASE + path);
+    const res = await fetch(BASE + path, { headers: authHeaders() });
     if (!res.ok) {
       let detail = "Request failed (" + res.status + ")";
       try { const j = await res.json(); detail = j.detail || detail; } catch { /* ignore */ }
@@ -20,7 +27,7 @@ window.MarketClient = (() => {
   async function post(path, body) {
     const res = await fetch(BASE + path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: body ? JSON.stringify(body) : null,
     });
     if (!res.ok) {
