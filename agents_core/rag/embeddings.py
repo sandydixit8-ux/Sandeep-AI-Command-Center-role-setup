@@ -70,3 +70,65 @@ def bm25(chunk: str, query_terms: list[str], df: dict[str, int],
         denom = tf[t] + k1 * (1 - b + b * (dl / avg_chunk_len))
         score += idf * (tf[t] * (k1 + 1)) / (denom if denom else 1e-9)
     return score
+
+
+# ---------------------------------------------------------------------------
+# Local embeddings (dependency-free "semantic" vectors)
+#
+# Real embeddings APIs (OpenAI, etc.) are optional. To keep the RAG layer
+# self-contained and testable offline we embed with feature hashing: each term
+# maps (deterministically) to a fixed-dimension signed vector, and a chunk's
+# embedding is the length-normalised, IDF-weighted sum of its term vectors.
+# This gives cosine similarity a genuinely semantic-ish signal (shared domain
+# vocabulary lights up) without any network dependency. Set
+# ``EMBEDDING_DIM`` to tune the dimension (default 512).
+# ---------------------------------------------------------------------------
+
+import os as _os
+
+EMBED_DIM = int(_os.environ.get("EMBEDDING_DIM", "512") or 512)
+_HASH_SALT = 0x9E3779B97F4A7C15
+
+
+def _h(value: str) -> int:
+    h = _HASH_SALT
+    for ch in value.encode("utf-8"):
+        h ^= ch + 0x9E3779B9 + (h << 6) + (h >> 2)
+        h &= 0xFFFFFFFFFFFFFFFF
+    return h & 0xFFFFFFFFFFFFFFFF
+
+
+def term_vector(term: str, dim: int = EMBED_DIM) -> list[float]:
+    """Deterministic signed hashed vector for a single term (sparse projection)."""
+    idx = _h(term) % dim
+    sign = 1.0 if _h(term + "|s") % 2 == 0 else -1.0
+    vec = [0.0] * dim
+    vec[idx] = sign
+    return vec
+
+
+def embed(text: str, idf: dict[str, float] | None = None,
+          dim: int = EMBED_DIM) -> list[float]:
+    """IDF-weighted sum of term vectors, L2-normalised (zero vector for empty)."""
+    vec = [0.0] * dim
+    for t in tokenise(text):
+        idf_t = (idf or {}).get(t, 1.0)
+        idx = _h(t) % dim
+        sign = 1.0 if _h(t + "|s") % 2 == 0 else -1.0
+        vec[idx] += sign * idf_t
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm == 0:
+        return vec
+    return [v / norm for v in vec]
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two embeddings (0.0 for empty/zero vectors)."""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)

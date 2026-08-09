@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ import httpx
 
 from .config import DATA_DIR
 from .safety import safety_gate
+from . import circuit_breaker as cb
 
 # --------------------------------------------------------------------------- data
 
@@ -151,6 +153,7 @@ class MarketDataProvider(Protocol):
     def list_stocks(self) -> list[dict[str, Any]]: ...
     def ohlc(self, symbol: str, days: int = 200) -> list[dict[str, float]]: ...
     def status(self) -> dict[str, str]: ...
+    def orderbook(self, symbol: str) -> dict[str, Any] | None: ...
 
 
 class MockMarketProvider:
@@ -221,6 +224,30 @@ class MockMarketProvider:
         series[-1]["high"] = max(series[-1]["high"], s["price"])
         series[-1]["low"] = min(series[-1]["low"], s["price"])
         return series
+
+    def orderbook(self, symbol: str) -> dict[str, Any] | None:
+        """Deterministic mock orderbook built around the current mock price."""
+        s = self.get_stock(symbol)
+        if not s:
+            return None
+        rng = _deterministic_rng(symbol)
+        px = float(s["price"])
+        levels = []
+        for i in range(1, 6):
+            levels.append({
+                "level": i,
+                "bid": round(px - i * px * 0.0004, 2),
+                "bid_qty": int(s["avg_volume"] / 40 * rng.uniform(0.6, 1.4)),
+                "ask": round(px + i * px * 0.0004, 2),
+                "ask_qty": int(s["avg_volume"] / 40 * rng.uniform(0.6, 1.4)),
+            })
+        return {
+            "symbol": s["symbol"],
+            "source": self.name(),
+            "quality": "🟡 Delayed (demo data)",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "levels": levels,
+        }
 
     def status(self) -> dict[str, str]:
         return {"provider": self.name(), "mode": "demo", "data": "delayed-mock", "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -400,6 +427,47 @@ class MoneycontrolMarketProvider:
             self._mark_degraded()
             return self._mock.ohlc(symbol, days)
 
+    # ------------------------------------------------------------------ orderbook
+
+    def orderbook(self, symbol: str) -> dict[str, Any] | None:
+        """Live orderbook via Moneycontrol's market-depth pricefeed, mock fallback."""
+        s = self.get_stock(symbol)
+        if not s:
+            return None
+        sc_id = MC_STOCK_IDS.get(s["symbol"])
+        if not sc_id:
+            return self._mock.orderbook(symbol)
+        try:
+            payload = self._get_json(f"{MC_PRICE_FEED}/nse/equitycash/{sc_id}")
+            d = payload["data"]
+            asks = d.get("ask") or {}
+            bids = d.get("bid") or {}
+            levels = []
+            for i in range(1, 6):
+                ask = float(asks.get(f"price{i}") or 0)
+                ask_qty = int(asks.get(f"qty{i}") or 0)
+                bid = float(bids.get(f"price{i}") or 0)
+                bid_qty = int(bids.get(f"qty{i}") or 0)
+                if not (ask or bid):
+                    continue
+                levels.append({
+                    "level": i,
+                    "bid": round(bid, 2), "bid_qty": bid_qty,
+                    "ask": round(ask, 2), "ask_qty": ask_qty,
+                })
+            return {
+                "symbol": s["symbol"],
+                "source": self.name(),
+                "quality": "🟢 Live (Moneycontrol)",
+                "timestamp": str(d.get("lastupd") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "levels": levels,
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._fallback_reason = f"{symbol} orderbook: {exc}"
+            self._mark_degraded()
+            return self._mock.orderbook(symbol)
+
     # ------------------------------------------------------------------ status
 
     def status(self) -> dict[str, str]:
@@ -419,11 +487,231 @@ class MoneycontrolMarketProvider:
         }
 
 
+class UpstoxMarketProvider:
+    """Live Indian market data from the Upstox v3 REST market-quote endpoints.
+
+    Uses the same access token / session lifecycle as the execution layer, so
+    quotes are genuinely live when the broker is configured (sandbox/live) and
+    fall back to Moneycontrol -> mock deterministically when it is not. Every
+    record is labelled with its true source. This is the broker-grade price
+    feed behind the SIGNAL ENGINE: prices are never invented here.
+    """
+
+    def __init__(self) -> None:
+        self._mc = MoneycontrolMarketProvider()
+        self._mock = MockMarketProvider()
+        self._last_live: str | None = None
+        self._last_fallback: str | None = None
+        self._fallback_reason: str | None = None
+
+    def name(self) -> str:
+        return "upstox-live"
+
+    def _broker_ready(self) -> bool:
+        try:
+            from . import upstox as u
+
+            cfg = u.get_broker_settings()
+            if cfg.mode not in (u.MODE_SANDBOX, u.MODE_LIVE) or not cfg.api_key:
+                return False
+            tok = u.SessionManager(cfg).ensure_access_token()
+            return bool(tok)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _quote(self, symbol: str) -> dict[str, Any] | None:
+        """Best-effort live quote from Upstox; None when the feed is unavailable."""
+        try:
+            from . import upstox as u
+
+            cfg = u.get_broker_settings()
+            rows = u.load_instruments()
+            key = u.resolve_instrument(symbol, rows)
+            if not key:
+                raise ValueError(f"no instrument key for {symbol}")
+            token = u.SessionManager(cfg).ensure_access_token()
+            data = u.UpstoxClient(cfg, token).quotes(key)
+            raw = (data.get("data") or {}).get(key) or {}
+            if not raw:
+                raise ValueError(f"no quote payload for {key}")
+            ltp = float(raw.get("last_price") or 0)
+            ohlc = raw.get("ohlc") or {}
+            prev = float((ohlc or {}).get("close") or 0)
+            if ltp <= 0:
+                raise ValueError(f"empty LTP for {key}")
+            return {
+                "instrument_token": key,
+                "ltp": ltp,
+                "prev_close": prev,
+                "open": float((ohlc or {}).get("open") or 0),
+                "high": float((ohlc or {}).get("high") or 0),
+                "low": float((ohlc or {}).get("low") or 0),
+                "volume": int(raw.get("volume") or 0),
+                "timestamp": str(raw.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "source": self.name(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._fallback_reason = f"{symbol}: {exc}"
+            return None
+
+    def get_stock(self, symbol: str) -> dict[str, Any] | None:
+        key = symbol.strip().upper()
+        base = None
+        for s in STOCKS:
+            if s["symbol"] == key or key in s["name"].upper():
+                base = s
+                break
+        if not base:
+            return None
+        q = self._quote(base["symbol"])
+        if q and q.get("ltp"):
+            self._last_live = q["timestamp"]
+            price = q["ltp"]
+            prev = q["prev_close"] or base["prev_close"]
+            return {
+                **base,
+                "price": price,
+                "prev_close": prev,
+                "change": round(price - prev, 2),
+                "change_pct": round((price - prev) / prev * 100, 2) if prev else 0,
+                "volume": q.get("volume") or base["volume"],
+                "status": "🟢 Open",
+                "timestamp": q["timestamp"],
+                "source": self.name(),
+                "quality": "🟢 Live (Upstox)",
+                "exchange": "NSE",
+                "instrument_token": q.get("instrument_token"),
+            }
+        return self._mc.get_stock(symbol)
+
+    def get_indices(self) -> list[dict[str, Any]]:
+        return self._mc.get_indices()
+
+    def list_stocks(self) -> list[dict[str, Any]]:
+        return [self.get_stock(s["symbol"]) for s in STOCKS]
+
+    def ohlc(self, symbol: str, days: int = 200) -> list[dict[str, float]]:
+        """Live OHLC from the Upstox OHLC endpoint when reachable, else MC/mock."""
+        try:
+            from . import upstox as u
+
+            cfg = u.get_broker_settings()
+            rows = u.load_instruments()
+            key = u.resolve_instrument(symbol, rows)
+            if not key:
+                raise ValueError(f"no instrument key for {symbol}")
+            token = u.SessionManager(cfg).ensure_access_token()
+            data = u.UpstoxClient(cfg, token).ohlc(key)
+            raw = (data.get("data") or {}).get(key) or {}
+            if not raw:
+                raise ValueError(f"no OHLC payload for {key}")
+            ohlc = raw.get("ohlc") or {}
+            candles = raw.get("candles") or []
+            if not candles:
+                raise ValueError("no candle series")
+            bars = []
+            for c in candles[:days]:
+                bars.append({
+                    "date": str(c.get("timestamp") or c.get("date") or ""),
+                    "open": round(float(c.get("open") or 0), 2),
+                    "high": round(float(c.get("high") or 0), 2),
+                    "low": round(float(c.get("low") or 0), 2),
+                    "close": round(float(c.get("close") or 0), 2),
+                    "volume": round(float(c.get("volume") or 0)),
+                })
+            if bars:
+                self._last_live = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                return bars
+            raise ValueError("empty candle series")
+        except Exception as exc:  # noqa: BLE001
+            self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._fallback_reason = f"{symbol} ohlc: {exc}"
+            return self._mc.ohlc(symbol, days)
+
+    def orderbook(self, symbol: str) -> dict[str, Any] | None:
+        """Live 5-level orderbook from the Upstox quote depth, else MC/mock."""
+        try:
+            from . import upstox as u
+
+            cfg = u.get_broker_settings()
+            rows = u.load_instruments()
+            key = u.resolve_instrument(symbol, rows)
+            if not key:
+                raise ValueError(f"no instrument key for {symbol}")
+            token = u.SessionManager(cfg).ensure_access_token()
+            data = u.UpstoxClient(cfg, token).quotes(key)
+            raw = (data.get("data") or {}).get(key) or {}
+            depth = raw.get("depth") or {}
+            if not depth:
+                raise ValueError(f"no depth for {key}")
+            levels = []
+            for i in range(1, 6):
+                buy = (depth.get("buy") or [])[i - 1] if i <= len(depth.get("buy") or []) else {}
+                sell = (depth.get("sell") or [])[i - 1] if i <= len(depth.get("sell") or []) else {}
+                levels.append({
+                    "level": i,
+                    "bid": float((buy or {}).get("price") or 0),
+                    "bid_qty": int((buy or {}).get("quantity") or 0),
+                    "ask": float((sell or {}).get("price") or 0),
+                    "ask_qty": int((sell or {}).get("quantity") or 0),
+                })
+            self._last_live = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return {
+                "symbol": symbol.strip().upper(),
+                "source": self.name(),
+                "quality": "🟢 Live (Upstox)",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "instrument_token": key,
+                "levels": levels,
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._last_fallback = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._fallback_reason = f"{symbol} orderbook: {exc}"
+            return self._mc.orderbook(symbol)
+
+    def status(self) -> dict[str, str]:
+        if self._last_live is None and self._last_fallback is None:
+            try:
+                self.get_indices()
+            except Exception:  # noqa: BLE001
+                pass
+        mode = "live" if self._last_live else ("fallback" if self._last_fallback else "unknown")
+        return {
+            "provider": self.name(),
+            "mode": mode,
+            "data": "upstox-market-quote" if self._last_live else "moneycontrol/mock",
+            "updated": self._last_live or self._last_fallback or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "fallback_reason": self._fallback_reason or "",
+            "quality": "🟢 Live (Upstox)" if self._last_live else "🟡 Delayed (demo data)",
+        }
+
+
 def get_provider() -> MarketDataProvider:
-    """Return the configured provider: live Moneycontrol with mock fallback."""
+    """Return the configured provider: Upstox live when available, else live
+    Moneycontrol with mock fallback.
+
+    MARKET_DATA_SOURCE env selects the preference: 'upstox' (default) tries the
+    broker feed first, 'moneycontrol' uses the public feed directly, 'mock'
+    forces the deterministic demo provider.
+    """
     global _provider
-    if _provider is None:
+    if _provider is not None:
+        return _provider
+    source = (os.environ.get("MARKET_DATA_SOURCE") or "upstox").strip().lower()
+    if source == "mock":
+        _provider = MockMarketProvider()
+    elif source == "moneycontrol":
         _provider = MoneycontrolMarketProvider()
+    else:
+        try:
+            up = UpstoxMarketProvider()
+            if up._broker_ready():
+                _provider = up
+            else:
+                _provider = MoneycontrolMarketProvider()
+        except Exception:  # noqa: BLE001
+            _provider = MoneycontrolMarketProvider()
     return _provider
 
 
@@ -989,6 +1277,15 @@ def paper_portfolio() -> dict[str, Any]:
     return st
 
 
+def _daily_loss_equity_provider() -> dict[str, Any]:
+    """Equity snapshot for the daily-loss breaker from the paper portfolio."""
+    st = paper_portfolio()
+    return {"equity": st["total_value"], "realized_today": st["realized_pnl"]}
+
+
+cb.get_guard().set_equity_provider(_daily_loss_equity_provider)
+
+
 def _quote_age_hours(s: dict[str, Any]) -> float | None:
     """Best-effort age in hours of a quote from its timestamp; None if unparseable."""
     ts = (s or {}).get("timestamp", "")
@@ -1029,6 +1326,7 @@ def _paper_gate(s: dict[str, Any]) -> None:
 
 def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target: float | None = None) -> dict[str, Any]:
     safety_gate("paper_stock", f"BUY {symbol} x {quantity}")
+    cb.check_open(f"paper buy {symbol} x {quantity}")
     s = get_provider().get_stock(symbol)
     if not s:
         raise ValueError(f"unknown symbol: {symbol}")
@@ -1070,6 +1368,7 @@ def paper_sell(symbol: str, quantity: int) -> dict[str, Any]:
     st["trades"].append({"type": "SELL", "symbol": s["symbol"], "quantity": quantity,
                          "price": price, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pnl": round(pnl, 2)})
     _save_paper(st)
+    cb.record_trade(round(pnl, 2))
     return {"status": "PAPER TRADE executed (simulated, no real money)", "symbol": s["symbol"],
             "quantity": quantity, "price": price, "pnl": round(pnl, 2), "cash": round(st["cash"], 2)}
 

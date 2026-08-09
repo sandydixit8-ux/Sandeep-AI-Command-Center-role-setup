@@ -1475,6 +1475,19 @@
           <div class="mkt-summary">${esc(b.summary)}</div>
           <div class="mkt-interp">🤖 ${esc(b.ai_interpretation)}</div>
         </div>
+        <div class="card" style="margin-top:14px" id="autoTradeCard">
+          <div class="row" style="flex-wrap:wrap;gap:12px;align-items:center">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="avatar sm" id="atIcon">🤖</span>
+              <div><b>Automatic Trading</b><div class="muted small" id="atSub">Loading…</div></div>
+            </div>
+            <div class="grow"></div>
+            <span class="badge" id="atBadge" style="font-weight:600">—</span>
+            <button class="btn btn-primary" id="atStart">▶ Start</button>
+            <button class="btn" id="atStop">⏹ Stop</button>
+          </div>
+          <div class="muted small" id="atDetail" style="margin-top:8px"></div>
+        </div>
         <div class="dash-grid" style="margin-top:14px">
           ${r ? mktStat("Regime", r.regime.split(" ")[0], r.tone) : ""}
           ${mktStat("NIFTY 50", fmtNum(b.indices[0] && b.indices[0].value), fmtPct(b.indices[0] && b.indices[0].change_pct))}
@@ -1497,7 +1510,44 @@
           ${mktQuick("📈", "Backtest", "Test the EMA+RSI strategy", "backtest")}
           ${mktQuick("🧪", "Paper Trading", "Simulate trades safely", "paper")}
         </div>`;
+      bindAutoTrading();
     });
+  }
+
+  function bindAutoTrading() {
+    const card = $("#autoTradeCard");
+    if (!card) return;
+    const startBtn = $("#atStart"), stopBtn = $("#atStop");
+    let timer = null;
+    const paint = (t) => {
+      if (!t) return;
+      const running = t.running === true;
+      $("#atBadge").textContent = running ? "🟢 RUNNING" : "⏸ STOPPED";
+      $("#atBadge").className = "badge " + (running ? "ok" : "wait");
+      $("#atIcon").textContent = running ? "🤖" : "💤";
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+      const sub = [];
+      sub.push((running ? "Running" : "Stopped") + " · " + (t.cycles || 0) + " cycles");
+      if (t.interval_sec) sub.push("every " + t.interval_sec + "s");
+      if (t.agent) sub.push("agent: " + t.agent);
+      if (t.mode) sub.push(t.mode);
+      $("#atSub").textContent = sub.join(" · ");
+      $("#atDetail").textContent = (running && t.last_cycle_at ? "Last cycle " + esc(t.last_cycle_at) : t.stop_reason ? "Stopped: " + esc(t.stop_reason) : "") +
+        (t.last_result ? "\nLast result: " + esc(String(t.last_result).slice(0, 220)) : "");
+    };
+    const refresh = () => window.MarketClient.tradingStatus().then(j => { paint((j && j.trading) || null); }).catch(() => {});
+    startBtn.addEventListener("click", () => {
+      window.MarketClient.tradingStart().then(j => { paint((j && j.trading) || null); toast("Auto trading", "Started. Each cycle runs the risk agent through the safety gates.", "ok"); })
+        .catch(e => toast("Start failed", e.message, "err"));
+    });
+    stopBtn.addEventListener("click", () => {
+      window.MarketClient.tradingStop().then(j => { paint((j && j.trading) || null); toast("Auto trading", "Stopped. No further cycles will run.", "warn"); })
+        .catch(e => toast("Stop failed", e.message, "err"));
+    });
+    refresh();
+    timer = setInterval(refresh, 5000);
+    window.addEventListener("hashchange", () => { clearInterval(timer); }, { once: true });
   }
   function mktQuick(ic, t, d, view) {
     return '<div class="card hoverable" data-goto="' + view + '" style="cursor:pointer"><div class="row"><span class="avatar sm">' + ic + '</span><b>' + t + '</b></div><div class="card-sub" style="margin-top:8px">' + d + '</div><div style="margin-top:10px"><span class="badge">Open →</span></div></div>';

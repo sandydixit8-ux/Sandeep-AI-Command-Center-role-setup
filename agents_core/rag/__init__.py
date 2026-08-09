@@ -26,11 +26,14 @@ def get_index() -> RagIndex:
     return _index
 
 
-def rag_query(question: str, top_k: int = 5) -> dict[str, Any]:
+def rag_query(question: str, top_k: int = 5, section: str | None = None,
+              hybrid: bool = True) -> dict[str, Any]:
     """Retrieve the most relevant knowledge chunks for a question.
 
-    Returns raw results plus a rendered citation block (``context``) ready to
-    be injected into the agent prompt, and a compact citation map (``cites``).
+    Supports optional ``section`` metadata filtering (e.g. 'sebi', 'risk') and
+    hybrid BM25+embedding retrieval. Returns raw results plus a rendered citation
+    block (``context``) ready to be injected into the agent prompt, and a compact
+    citation map (``cites``).
     """
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
@@ -45,15 +48,23 @@ def rag_query(question: str, top_k: int = 5) -> dict[str, Any]:
                 "context": "",
                 "cites": [],
             }
-    results = idx.query(question, top_k)
+    results = idx.query(question, top_k, section=section, hybrid=hybrid)
     return {
         "status": "ok",
         "question": question,
+        "section": section,
+        "hybrid": hybrid,
         "results": results,
         "sources": sorted({r["source"] for r in results}),
+        "sections": sorted({r["section"] for r in results}),
         "context": render_citations(results),
         "cites": citation_index(results),
     }
+
+
+def rag_drift() -> dict[str, Any]:
+    """Data-drift check: corpus vs index (added/changed/removed documents)."""
+    return {"status": "ok", "drift": get_index().drift()}
 
 
 def rag_index(path: str | None = None) -> dict[str, Any]:
@@ -67,9 +78,14 @@ def rag_index(path: str | None = None) -> dict[str, Any]:
     return {"status": "ok", "index": stats}
 
 
+def rag_graph(max_terms: int = 200, top_edges: int = 30) -> dict[str, Any]:
+    """Knowledge-graph-lite: salient term co-occurrence over the corpus."""
+    return {"status": "ok", "graph": get_index().graph(max_terms=max_terms, top_edges=top_edges)}
+
+
 def rag_status() -> dict[str, Any]:
     return {"status": "ok", "index": get_index().stats()}
 
 
-__all__ = ["rag_query", "rag_index", "rag_status", "get_index", "RagIndex",
-           "render_citations", "citation_index"]
+__all__ = ["rag_query", "rag_index", "rag_status", "rag_drift", "rag_graph",
+           "get_index", "RagIndex", "render_citations", "citation_index"]

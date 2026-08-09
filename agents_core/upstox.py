@@ -19,6 +19,10 @@ Apr-01-2026) is built into this module:
 - Audit retention: every broker action is appended to ``data/broker_orders.jsonl``
   (retention-ready, exportable via ``export_broker_audit()`` for the 5-year rule).
 
+The regulatory checks (algo-ID, rate limit, fail-closed readiness) live in the
+dedicated compliance engine (``agents_core.compliance.ComplianceEngine``); this
+adapter delegates every order/modify/cancel through it before touching the broker.
+
 Modes
 -----
 off      (default)  No broker connectivity; order calls raise ExecutionBlockedError.
@@ -272,6 +276,22 @@ class UpstoxClient:
     def funds(self) -> dict[str, Any]:
         return self._request("GET", "/v3/user/get-funds-and-margin")
 
+    def quotes(self, instrument_key: str) -> dict[str, Any]:
+        """Live market quote (LTP, OHLC, volume, depth) for one instrument."""
+        return self._request(
+            "GET",
+            "/v3/market-quote/quotes",
+            params={"instrument_key": instrument_key},
+        )
+
+    def ohlc(self, instrument_key: str) -> dict[str, Any]:
+        """OHLC quote endpoint for one instrument."""
+        return self._request(
+            "GET",
+            "/v3/market-quote/ohlc",
+            params={"instrument_key": instrument_key},
+        )
+
 
 # --------------------------------------------------------------------------- audit
 
@@ -361,6 +381,15 @@ class OrderManager:
         self.cfg = cfg or get_broker_settings()
         self.limiter = RateLimiter(self.cfg.max_orders_per_sec)
         self.session = SessionManager(self.cfg)
+        from .compliance import ComplianceEngine
+
+        self.compliance = ComplianceEngine(
+            mode=self.cfg.mode,
+            api_key=self.cfg.api_key,
+            algo_id=self.cfg.algo_id,
+            is_live=self.cfg.is_live,
+            limiter=self.limiter.acquire,
+        )
         self._seq = 0
         self._seq_lock = threading.Lock()
 
@@ -383,13 +412,6 @@ class OrderManager:
         if not self.cfg.api_key:
             raise ExecutionBlockedError(
                 "UPSTOX_API_KEY is not set; broker adapter is not configured."
-            )
-
-    def _require_algo_id(self) -> None:
-        if self.cfg.is_live and not self.cfg.algo_id:
-            raise ExecutionBlockedError(
-                "live orders refused: UPSTOX_ALGO_ID not set. SEBI algo-ID tagging "
-                "requires the exchange-registered strategy id on every algo order."
             )
 
     def _build_payload(
@@ -423,6 +445,26 @@ class OrderManager:
             payload["algo_id"] = self.cfg.algo_id
         return payload
 
+    def _is_reducing(self, transaction_type: str, instrument_key: str, quantity: int) -> bool:
+        """True when the order only reduces/closes an existing net position.
+
+        Risk-reducing orders (SELL to close a long, BUY to cover a short) remain
+        allowed while the daily-loss breaker is tripped; opening orders are blocked."""
+        if self.cfg.mode == MODE_MOCK:
+            net = expected_positions().get(instrument_key, 0)
+        else:
+            try:
+                positions = self.portfolio().get("positions", {}).get("data") or []
+                net = next((int(p.get("net_qty", 0)) for p in positions
+                            if p.get("instrument_token") == instrument_key), 0)
+            except Exception:  # noqa: BLE001
+                net = 0
+        if transaction_type == "SELL":
+            return net > 0 and quantity <= net
+        if transaction_type == "BUY":
+            return net < 0 and quantity <= abs(net)
+        return False
+
     def _send(
         self,
         payload: dict[str, Any],
@@ -433,9 +475,9 @@ class OrderManager:
         quantity: int,
     ) -> dict[str, Any]:
         self._gate(detail)
-        self._require_ready()
-        self._require_algo_id()
-        self.limiter.acquire()
+        reducing = self._is_reducing(transaction_type, instrument_key, quantity)
+        # Compliance engine: readiness + algo-ID + rate limit (+ daily loss unless reducing).
+        self.compliance.pre_trade(detail, gate_daily_loss=not reducing)
 
         tag = payload["tag"]
         # Idempotency: if this tag already exists at the broker, return it (no re-send).
@@ -568,8 +610,7 @@ class OrderManager:
         order_type: str | None = None,
     ) -> dict[str, Any]:
         self._gate(f"MODIFY order {order_id} via {self.cfg.mode}")
-        self._require_ready()
-        self.limiter.acquire()
+        self.compliance.pre_trade(f"MODIFY order {order_id} via {self.cfg.mode}", gate_daily_loss=False)
         if not order_id:
             raise ValueError("order_id required")
         payload: dict[str, Any] = {"order_id": order_id}
@@ -602,8 +643,7 @@ class OrderManager:
 
     def cancel(self, order_id: str) -> dict[str, Any]:
         self._gate(f"CANCEL order {order_id} via {self.cfg.mode}")
-        self._require_ready()
-        self.limiter.acquire()
+        self.compliance.pre_trade(f"CANCEL order {order_id} via {self.cfg.mode}", gate_daily_loss=False)
         if not order_id:
             raise ValueError("order_id required")
         if self.cfg.mode == MODE_MOCK:

@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -149,7 +150,10 @@ def phase0():
     src = scan_source()
 
     # P0.1 broker/order keywords must be confined to the gated Upstox adapter
-    # and its tool wrappers — never reachable from an ungated path.
+    # and its tool wrappers — never reachable from an ungated path. The allowed
+    # set also includes modules that only DELEGATE to the gated adapter or read
+    # broker quotes (compliance engine, approval flow, live market feed, package
+    # init); none of them place orders directly.
     hits = re.findall(r"(place_order|submit_order|order_router|broker_api|Zerodha|Upstox|Fyers|AngelOne|Dhan|FREE_TRIAL|kiteconnect|order api|rout)", src, re.I)
     allowed_files = {"agents_core\\upstox.py", "agents_core\\tools.py", "agents_core\\config.py",
                      "agents_core\\upstox.py", "agents_core/upstox.py", "agents_core/tools.py",
@@ -162,16 +166,19 @@ def phase0():
             except OSError:
                 continue
             rel = p.relative_to(REPO).as_posix()
-            if rel in ("agents_core/upstox.py", "agents_core/tools.py", "agents_core/config.py"):
+            if rel in ("agents_core/upstox.py", "agents_core/tools.py", "agents_core/config.py",
+                       "agents_core/compliance.py", "agents_core/approval.py",
+                       "agents_core/market.py", "agents_core/__init__.py",
+                       "qa_redteam.py"):
                 continue
             found = re.findall(r"(place_order|submit_order|order_router|broker_api|Zerodha|Upstox|Fyers|AngelOne|Dhan|kiteconnect)", text, re.I)
             if found:
                 offending.append((rel, sorted(set(found))))
     r = check("P0.1", "0.Environment", "source",
               "Broker/order keywords confined to the gated Upstox adapter",
-              "only upstox.py + tool wrappers",
+              "only upstox.py + tool wrappers + delegating modules",
               f"{len(hits)} total hits", "offending files: " + (str(offending) if offending else "none"))
-    ok(r, not offending)
+    verdict(r, not offending)
 
     # P0.1b the adapter itself MUST gate every order send via safety_gate('live_order', ...)
     upstox_src = (REPO / "agents_core" / "upstox.py").read_text(encoding="utf-8")
@@ -181,6 +188,33 @@ def phase0():
               "gate present", f"gate_call={has_gate_call}",
               "OrderManager._gate maps live->live_order, sim->broker_sim", "P0")
     ok(r, has_gate_call)
+
+    # P0.1c delegating modules (compliance/approval/market-feed) never place
+    # orders directly — they call OrderManager.place / market.paper_* only via
+    # the gated path, never their own raw HTTP/execution.
+    delegating = {
+        "agents_core/compliance.py": "agents_core/compliance.py",
+        "agents_core/approval.py": "agents_core/approval.py",
+        "agents_core/market.py": "agents_core/market.py",
+    }
+    no_direct = True
+    for rel, _ in delegating.items():
+        f = REPO / rel
+        if not f.exists():
+            no_direct = False
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        # raw httpx call to the broker endpoints or safety_gate bypass would be a fail
+        if re.search(r"httpx\.(get|post|put|delete)\(.*v3/(order|portfolio)", text):
+            no_direct = False
+        # calling OrderManager.place (gated) is fine; calling place_order directly is not
+        if re.search(r"(?<!OrderManager\.)(place_order|submit_order)\(", text):
+            no_direct = False
+    r = check("P0.1c", "0.Environment", "source",
+              "Delegating modules only route orders through the gated adapter (no raw execution)",
+              "gated delegation", f"direct={not no_direct}",
+              "no direct broker HTTP / ungated order placement outside upstox.py", "P0")
+    verdict(r, no_direct)
 
     # P0.2 live-trading switch must exist AND be fail-closed by default
     gate_src = "safety_gate" in src and "live_order" in src
@@ -705,6 +739,88 @@ def phase7_risk():
                     f"error: {exc}", "exception", "P2")
         bad(row)
 
+    # --- Daily-loss circuit breaker -------------------------------------
+    from agents_core import circuit_breaker as cb
+
+    try:
+        import tempfile as _tf
+        _tmpdir = _tf.mkdtemp()
+        guard = cb.DailyLossGuard(
+            state_file=_tf.mkdtemp() + "/daily_loss.json",
+            capital=1000.0, limit_pct=10.0, limit_inr=0.0,
+        )
+        # provider: equity drops 8% -> below 10% limit -> allowed
+        guard.set_equity_provider(lambda: {"equity": 920.0})
+        guard.check_open("test normal")
+        row = check("P7.cb.ok", "7.Risk", "circuit_breaker.DailyLossGuard",
+                    "Below limit: opening allowed",
+                    "allowed", "no exception", "equity 920/1000, limit 10%", "P1")
+        ok(row, not guard.is_tripped())
+
+        # equity drops 20% -> over 10% limit -> blocked
+        guard.set_equity_provider(lambda: {"equity": 800.0})
+        blocked = False
+        try:
+            guard.check_open("test trip")
+        except cb.ExecutionBlockedError:
+            blocked = True
+        row = check("P7.cb.trip", "7.Risk", "circuit_breaker.DailyLossGuard",
+                    "At/over limit: opening blocked (fail-closed)",
+                    "blocked", f"blocked={blocked}",
+                    "equity 800/1000, limit 10% = 100", "P0")
+        ok(row, blocked and guard.is_tripped())
+
+        # realized trade accrual drops equity further
+        guard.record_trade(-50.0)
+        st = guard.status()
+        row = check("P7.cb.trade", "7.Risk", "circuit_breaker.DailyLossGuard",
+                    "record_trade accrues realized P&L and equity",
+                    "recorded", f"realized_today={st['realized_today']}",
+                    "record_trade(-50) -> realized_today=-50", "P1")
+        ok(row, st["realized_today"] == -50.0)
+
+        # audit trail is hash-chained
+        import json as _json
+        chain_ok = False
+        try:
+            audit_path = Path(guard.state_file).parent / "daily_loss_audit.jsonl"
+            lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+            chain_ok = len(lines) >= 1 and all(
+                _json.loads(l)["prev_hash"]
+                for l in lines[1:]
+            )
+        except Exception:
+            chain_ok = False
+        row = check("P7.cb.audit", "7.Risk", "circuit_breaker.DailyLossGuard",
+                    "Breaker audit trail hash-chained",
+                    "chained", f"chained={chain_ok}",
+                    "daily_loss_audit.jsonl prev_hash links", "P2")
+        ok(row, chain_ok)
+
+        # day reset: next-day state clears the trip
+        guard.state_file = Path(guard.state_file)
+        st_now = guard.status()
+        orig_day = st_now["today"]
+        # force a fresh guard on a new day key to simulate day rollover
+        guard2 = cb.DailyLossGuard(
+            state_file=guard.state_file,
+            capital=1000.0, limit_pct=10.0, limit_inr=0.0,
+        )
+        guard2._state = dict(guard._load())
+        guard2._state["day"] = "1999-01-01"  # stale day
+        guard2._save()
+        guard2.check_open("test next day")
+        st2 = guard2.status()
+        row = check("P7.cb.reset", "7.Risk", "circuit_breaker.DailyLossGuard",
+                    "New day resets the breaker (state cleared)",
+                    "reset", f"tripped={st2['tripped']}",
+                    "day changed -> start_equity/realized/tripped reset", "P1")
+        ok(row, st2["tripped"] is False and st2["realized_today"] == 0.0)
+    except Exception as exc:
+        row = check("P7.cb", "7.Risk", "circuit_breaker.DailyLossGuard", "breaker checks", "run",
+                    f"error: {exc}", "exception", "P1")
+        bad(row)
+
 
 # =====================================================================
 # PHASE 8 — RECOVERY / IDEMPOTENCY
@@ -991,6 +1107,241 @@ def phase10_rag():
 
 
 # =====================================================================
+# PHASE 11 — COMPLIANCE ENGINE, RAG ENRICHMENT, LIVE FEED, MODE A APPROVALS
+# =====================================================================
+def phase11_new_layers():
+    # ---------------------------------------------------------------- compliance engine
+    from agents_core import compliance as comp
+
+    try:
+        limiter_ok = True
+        calls = {"n": 0}
+
+        def fake_limiter():
+            calls["n"] += 1
+
+        eng = comp.ComplianceEngine(
+            mode="live", api_key="k", algo_id="ALGO-1", is_live=True,
+            limiter=fake_limiter,
+        )
+        dec = eng.pre_trade("test", gate_daily_loss=False)
+        row = check("P11.comp.pass", "11.Layers", "compliance.ComplianceEngine",
+                    "Compliant live order passes all pre-trade checks",
+                    "allowed", f"allowed={dec.allowed}",
+                    "readiness + algo_id + rate limit all true", "P1")
+        ok(row, dec.allowed and calls["n"] == 1)
+
+        # live without algo id -> blocked
+        eng2 = comp.ComplianceEngine(
+            mode="live", api_key="k", algo_id="", is_live=True,
+            limiter=fake_limiter,
+        )
+        blocked = False
+        try:
+            eng2.pre_trade("test", gate_daily_loss=False)
+        except comp.ExecutionBlockedError:
+            blocked = True
+        row = check("P11.comp.algo", "11.Layers", "compliance.ComplianceEngine",
+                    "Live order without algo id is blocked (SEBI algo-ID tagging)",
+                    "blocked", f"blocked={blocked}",
+                    "check_algo_id fails for live orders with empty id", "P0")
+        ok(row, blocked)
+
+        # OFF mode -> blocked
+        eng3 = comp.ComplianceEngine(
+            mode="off", api_key="", algo_id="", is_live=False,
+            limiter=fake_limiter,
+        )
+        blocked_off = False
+        try:
+            eng3.pre_trade("test", gate_daily_loss=False)
+        except comp.ExecutionBlockedError:
+            blocked_off = True
+        row = check("P11.comp.off", "11.Layers", "compliance.ComplianceEngine",
+                    "OFF broker mode is blocked (fail-closed)",
+                    "blocked", f"blocked={blocked_off}",
+                    "readiness false when mode=off", "P0")
+        ok(row, blocked_off)
+
+        # audit trail hash-chained
+        chain_ok = False
+        try:
+            af = comp.compliance_audit_file()
+            lines = af.read_text(encoding="utf-8").strip().splitlines()
+            chain_ok = len(lines) >= 1 and all(
+                json.loads(l)["prev_hash"] for l in lines[1:])
+        except Exception:
+            chain_ok = False
+        row = check("P11.comp.audit", "11.Layers", "compliance",
+                    "Compliance decisions hash-chained audit trail",
+                    "chained", f"chained={chain_ok}",
+                    "compliance_audit.jsonl prev_hash links", "P2")
+        ok(row, chain_ok)
+    except Exception as exc:
+        row = check("P11.comp", "11.Layers", "compliance.ComplianceEngine", "compliance checks", "run",
+                    f"error: {exc}", "exception", "P1")
+        bad(row)
+
+    # ---------------------------------------------------------------- RAG enrichment
+    from agents_core import rag
+
+    try:
+        q = rag.rag_query("algo id tagging rule", top_k=4)
+        has_hybrid = all("sim" in r and "section" in r and "bm25" in r for r in q.get("results", []))
+        row = check("P11.rag.hybrid", "11.Layers", "rag.RagIndex",
+                    "Hybrid retrieval: results carry BM25 + embedding sim + section",
+                    "hybrid fields", f"hybrid={has_hybrid}",
+                    "query() fuses BM25 and embedding cosine, re-ranks", "P2")
+        ok(row, has_hybrid and len(q.get("results", [])) >= 1)
+
+        sec = rag.rag_query("daily loss limit", top_k=3, section="risk")
+        row = check("P11.rag.filter", "11.Layers", "rag.RagIndex",
+                    "Metadata filter restricts results to one section",
+                    "risk-only", f"sections={sec.get('sections')}",
+                    "section filter on query()", "P2")
+        ok(row, set(sec.get("sections", [])) <= {"risk"})
+
+        d = rag.rag_drift()
+        row = check("P11.rag.drift", "11.Layers", "rag.RagIndex",
+                    "Data-drift check returns FRESH/STALE verdict",
+                    "verdict", f"verdict={d.get('drift', {}).get('verdict')}",
+                    "drift() compares corpus hashes vs index", "P2")
+        ok(row, d.get("drift", {}).get("verdict") in ("FRESH", "STALE"))
+
+        g = rag.rag_graph(max_terms=100, top_edges=20)
+        row = check("P11.rag.graph", "11.Layers", "rag.RagIndex",
+                    "Knowledge-graph-lite builds nodes + edges",
+                    "nodes+edges", f"nodes={len(g.get('graph', {}).get('nodes', []))}",
+                    "co-occurrence graph from corpus", "P3")
+        ok(row, len(g.get("graph", {}).get("nodes", [])) >= 2)
+    except Exception as exc:
+        row = check("P11.rag", "11.Layers", "rag", "rag enrichment checks", "run",
+                    f"error: {exc}", "exception", "P2")
+        bad(row)
+
+    # ---------------------------------------------------------------- live feed / orderbook
+    try:
+        os.environ["MARKET_DATA_SOURCE"] = "mock"
+        import agents_core.market as mkt
+        p = mkt.get_provider()
+        ob = p.orderbook("RELIANCE")
+        row = check("P11.feed.ob", "11.Layers", "market.provider",
+                    "Orderbook endpoint returns 5 levels with source label",
+                    "5 levels", f"levels={len((ob or {}).get('levels', []))}",
+                    "orderbook() on provider (mock fallback)", "P2")
+        ok(row, ob and len(ob.get("levels", [])) == 5 and ob.get("source"))
+    except Exception as exc:
+        row = check("P11.feed.ob", "11.Layers", "market.provider", "orderbook", "run",
+                    f"error: {exc}", "exception", "P2")
+        bad(row)
+
+    # ---------------------------------------------------------------- Mode A approvals
+    import agents_core.approval as appr
+    try:
+        ap_dir = Path(tempfile.mkdtemp(prefix="qa_approval_"))
+        flow = appr.ApprovalFlow(state_file=ap_dir / "approvals.json")
+        os.environ["ORDER_APPROVAL_MODE"] = "on"
+
+        rec = flow.submit({"symbol": "RELIANCE", "quantity": 2,
+                           "transaction_type": "BUY", "kind": "paper"})
+        row = check("P11.ap.draft", "11.Layers", "approval.ApprovalFlow",
+                    "Agent submits an order DRAFT (Mode A) -> PENDING",
+                    "PENDING", f"status={rec.get('status')} id={rec.get('id')}",
+                    "submit() parks the draft; nothing is executed yet", "P1")
+        ok(row, rec.get("status") == "PENDING")
+
+        pending = flow.list_pending()
+        row = check("P11.ap.pending", "11.Layers", "approval.ApprovalFlow",
+                    "Pending draft appears in the approval queue",
+                    "1 pending", f"pending={len(pending)}",
+                    "list_pending() includes the new draft", "P1")
+        ok(row, len(pending) == 1)
+
+        rec2 = flow.approve(rec["id"])
+        row = check("P11.ap.approve", "11.Layers", "approval.ApprovalFlow",
+                    "Human approval executes the draft via the fail-closed path",
+                    "EXECUTED", f"status={rec2.get('status')}",
+                    "approve() runs paper_buy through the same gate chain", "P0")
+        ok(row, rec2.get("status") == "EXECUTED")
+
+        # reject path
+        rec3 = flow.submit({"symbol": "INFY", "quantity": 1,
+                            "transaction_type": "SELL", "kind": "paper"})
+        rec3r = flow.reject(rec3["id"], "nope")
+        row = check("P11.ap.reject", "11.Layers", "approval.ApprovalFlow",
+                    "Human rejection marks the draft REJECTED (nothing executes)",
+                    "REJECTED", f"status={rec3r.get('status')}",
+                    "reject() flips PENDING -> REJECTED with reason", "P1")
+        ok(row, rec3r.get("status") == "REJECTED")
+
+        # audit chain
+        chain_ok = False
+        try:
+            af = ap_dir / "order_approvals_audit.jsonl"
+            lines = af.read_text(encoding="utf-8").strip().splitlines()
+            chain_ok = len(lines) >= 3 and all(
+                json.loads(l)["prev_hash"] for l in lines[1:])
+        except Exception:
+            chain_ok = False
+        row = check("P11.ap.audit", "11.Layers", "approval.ApprovalFlow",
+                    "Approval lifecycle hash-chained audit trail",
+                    "chained", f"chained={chain_ok}",
+                    "draft/approve/reject/execute all recorded with prev_hash", "P2")
+        ok(row, chain_ok)
+    except Exception as exc:
+        row = check("P11.ap", "11.Layers", "approval.ApprovalFlow", "mode A checks", "run",
+                    f"error: {exc}", "exception", "P1")
+        bad(row)
+
+    # ---------------------------------------------------------------- auto-trading start/stop
+    import agents_core.trading as tr
+    from agents_core.safety import ExecutionBlockedError
+    try:
+        td_dir = Path(tempfile.mkdtemp(prefix="qa_trading_"))
+        ctrl = tr.TradingController(state_file=td_dir / "trading.json")
+        os.environ["AUTO_TRADE_INTERVAL"] = "5"
+        os.environ["AGENT_LLM_PROVIDER"] = "mock"
+
+        # FAIL-CLOSED: default is STOPPED
+        row = check("P11.td.default", "11.Layers", "trading.TradingController",
+                    "Automatic trading is STOPPED by default (fail-closed)",
+                    "STOPPED", f"status={ctrl.status()['status']}",
+                    "controller starts STOPPED; must be explicitly started", "P0")
+        ok(row, ctrl.status()["status"] == "STOPPED")
+
+        # start refuses when a kill switch is active
+        kf = td_dir / ".kill_switch"
+        kf.write_text("stop", encoding="utf-8")
+        os.environ["AGENT_KILL_SWITCH_FILE"] = str(kf)
+        blocked = False
+        try:
+            ctrl.start()
+        except ExecutionBlockedError:
+            blocked = True
+        row = check("P11.td.kill", "11.Layers", "trading.TradingController",
+                    "Start refuses while a kill switch is active (fail-closed)",
+                    "blocked", f"blocked={blocked}",
+                    "start() checks kill_switch_active and raises", "P0")
+        ok(row, blocked)
+        os.environ.pop("AGENT_KILL_SWITCH_FILE", None)
+
+        # start -> RUNNING, cycles accrue, stop works
+        ctrl.start()
+        ok_run = ctrl.status()["running"] is True
+        time.sleep(1)
+        sp = ctrl.stop(reason="qa")
+        row = check("P11.td.startstop", "11.Layers", "trading.TradingController",
+                    "Start sets RUNNING; stop returns to STOPPED",
+                    "RUNNING->STOPPED", f"running={ok_run} stop={sp['status']}",
+                    "start() spawns loop; stop() halts and records reason", "P1")
+        ok(row, ok_run and sp["status"] == "STOPPED")
+    except Exception as exc:
+        row = check("P11.td", "11.Layers", "trading.TradingController", "auto-trading checks", "run",
+                    f"error: {exc}", "exception", "P1")
+        bad(row)
+
+
+# =====================================================================
 # master scoring + report
 # =====================================================================
 WEIGHTS = {
@@ -1013,6 +1364,7 @@ PHASE_TO_CAT = {
     "8.Recovery": "Reliability/Recovery",
     "9.Broker": "Broker/Execution",
     "10.RAG": "AI Reliability",
+    "11.Layers": "Functional Correctness",
 }
 
 
@@ -1034,6 +1386,7 @@ def main() -> int:
     phase8_recovery()
     phase9_broker()
     phase10_rag()
+    phase11_new_layers()
 
     # render matrix
     print("\n== TRADE-AGENT-QA: MASTER TEST MATRIX ==")

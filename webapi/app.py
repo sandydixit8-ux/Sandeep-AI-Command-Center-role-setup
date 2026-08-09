@@ -171,6 +171,14 @@ def market_ohlc(symbol: str, days: int = 200) -> list[dict]:
     return market.get_provider().ohlc(symbol, max(2, min(days, 750)))
 
 
+@app.get("/api/v1/market/orderbook/{symbol}")
+def market_orderbook(symbol: str) -> dict:
+    s = market.get_provider().orderbook(symbol)
+    if s is None:
+        raise HTTPException(status_code=404, detail=f"unknown symbol: {symbol}")
+    return s
+
+
 @app.get("/api/v1/market/technical/{symbol}")
 def market_technical(symbol: str) -> dict:
     _stock_or_404(symbol)
@@ -425,3 +433,132 @@ def options_intel_events() -> list[dict]:
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+# --------------------------------------------------------------------------- compliance + rag enrichment
+
+
+@app.get("/api/v1/compliance/status")
+def compliance_status() -> dict:
+    from agents_core import compliance as comp
+
+    return comp.compliance_posture()
+
+
+@app.get("/api/v1/rag/drift")
+def rag_drift() -> dict:
+    from agents_core import rag as rag_mod
+
+    return rag_mod.rag_drift()
+
+
+@app.get("/api/v1/rag/graph")
+def rag_graph() -> dict:
+    from agents_core import rag as rag_mod
+
+    return rag_mod.rag_graph()
+
+
+# --------------------------------------------------------------------------- mode A order approvals
+
+
+class DraftRequest(BaseModel):
+    symbol: str
+    quantity: int
+    transaction_type: str
+    order_type: str = "MARKET"
+    product: str = "I"
+    price: float = 0.0
+    trigger_price: float = 0.0
+    kind: str = "paper"
+
+
+@app.get("/api/v1/approvals")
+def approvals_list(pending_only: bool = True) -> dict:
+    from agents_core import approval as appr
+
+    return {"status": "ok", "approvals": appr.get_flow().list_pending() if pending_only else appr.get_flow().list_all()}
+
+
+@app.get("/api/v1/approvals/status")
+def approvals_status() -> dict:
+    from agents_core import approval as appr
+
+    return {"status": "ok", **appr.approvals_status()}
+
+
+@app.post("/api/v1/approvals/submit")
+def approvals_submit(req: DraftRequest) -> dict:
+    from agents_core import approval as appr
+
+    try:
+        record = appr.submit_draft({
+            "symbol": req.symbol.upper(),
+            "quantity": req.quantity,
+            "transaction_type": req.transaction_type,
+            "order_type": req.order_type,
+            "product": req.product,
+            "price": req.price,
+            "trigger_price": req.trigger_price,
+            "kind": req.kind,
+        })
+    except appr.ApprovalError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "PENDING", "approval_id": record["id"], "draft": record["draft"]}
+
+
+@app.post("/api/v1/approvals/{approval_id}/approve")
+def approvals_approve(approval_id: str) -> dict:
+    from agents_core import approval as appr
+
+    try:
+        record = appr.approve(approval_id)
+    except appr.ApprovalError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": record["status"], "approval_id": approval_id, "result": record.get("result")}
+
+
+@app.post("/api/v1/approvals/{approval_id}/reject")
+def approvals_reject(approval_id: str, reason: str = "") -> dict:
+    from agents_core import approval as appr
+
+    try:
+        record = appr.reject(approval_id, reason)
+    except appr.ApprovalError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": record["status"], "approval_id": approval_id}
+
+
+# --------------------------------------------------------------------------- automatic trading (start/stop)
+
+
+class TradingControl(BaseModel):
+    interval: float | None = None
+    agent: str | None = None
+    task: str | None = None
+
+
+@app.get("/api/v1/trading/status")
+def trading_status() -> dict:
+    from agents_core import trading
+
+    return {"status": "ok", "trading": trading.status()}
+
+
+@app.post("/api/v1/trading/start")
+def trading_start(req: TradingControl) -> dict:
+    from agents_core import trading
+    from agents_core.safety import ExecutionBlockedError
+
+    try:
+        return {"status": "ok", "trading": trading.start(
+            interval=req.interval, agent=req.agent, task=req.task)}
+    except ExecutionBlockedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/trading/stop")
+def trading_stop() -> dict:
+    from agents_core import trading
+
+    return {"status": "ok", "trading": trading.stop(reason="ui")}

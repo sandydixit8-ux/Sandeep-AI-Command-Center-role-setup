@@ -38,6 +38,7 @@ import httpx
 
 from .config import DATA_DIR
 from .safety import safety_gate
+from . import circuit_breaker as cb
 
 # --------------------------------------------------------------------------- constants
 
@@ -1341,6 +1342,7 @@ class OptionsPaperEngine:
              idempotency_key: str = "") -> OptionsPosition:
         safety_gate("paper_option",
                     f"{action} {quantity}x {underlying} {strike} {option_type} {expiry}")
+        cb.check_open(f"paper option {action} {underlying} {strike} {option_type}")
         if idempotency_key:
             existing = self._find_by_idem(idempotency_key)
             if existing is not None:

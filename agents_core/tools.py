@@ -524,6 +524,13 @@ def tool_market_stocks() -> str:
     return _market_module().get_provider().list_stocks()
 
 
+def tool_market_orderbook(symbol: str) -> str:
+    s = _market_module().get_provider().orderbook(symbol)
+    if s is None:
+        raise ToolError(f"unknown symbol: {symbol}")
+    return s
+
+
 def tool_market_technical(symbol: str) -> str:
     return _market_module().technical_view(symbol)
 
@@ -679,6 +686,71 @@ def tool_broker_reconcile() -> str:
     return _as_json(_broker_module().reconcile())
 
 
+def tool_risk_daily_limit() -> str:
+    """Daily-loss circuit breaker status (day, equity, loss, limit, tripped).
+    Read-only; when tripped no new positions are allowed today."""
+    from . import circuit_breaker as cb
+
+    return _as_json(cb.get_guard().status())
+
+
+def tool_compliance_status() -> str:
+    """SEBI algo-framework compliance posture: broker mode, readiness, algo-ID
+    tagging, rate limit, audit trail. Read-only."""
+    from . import compliance as comp
+
+    return _as_json(comp.compliance_posture())
+
+
+def tool_order_draft(symbol: str, quantity: int, transaction_type: str,
+                     order_type: str = "MARKET", product: str = "I",
+                     price: float = 0.0, trigger_price: float = 0.0,
+                     kind: str = "paper") -> str:
+    """Mode A (human approval): park an order DRAFT for a human to approve before
+    it executes. NO order is sent until the human approves it via the UI/API.
+    Set kind='broker' for a broker order draft (fail-closed as usual) or leave
+    'paper' for a simulated trade. Returns the pending approval id."""
+    from . import approval as appr
+
+    if not appr.approval_enabled():
+        return _as_json({
+            "status": "not-enabled",
+            "note": "ORDER_APPROVAL_MODE is not 'on'; the agent executes directly (Mode B). "
+                    "Set ORDER_APPROVAL_MODE=on to route orders through human approval.",
+        })
+    record = appr.submit_draft({
+        "symbol": symbol.upper(),
+        "quantity": quantity,
+        "transaction_type": transaction_type,
+        "order_type": order_type,
+        "product": product,
+        "price": price,
+        "trigger_price": trigger_price,
+        "kind": kind,
+    })
+    return _as_json({
+        "status": "PENDING",
+        "approval_id": record["id"],
+        "note": "Awaiting human approval. No order has been sent.",
+        "kind": kind,
+        "draft": record["draft"],
+    })
+
+
+def tool_order_approvals() -> str:
+    """List pending order drafts awaiting human approval (Mode A)."""
+    from . import approval as appr
+
+    return _as_json(appr.get_flow().list_pending())
+
+
+def tool_order_approval_status() -> str:
+    """Mode A approval-flow status: enabled, pending count, state/audit files."""
+    from . import approval as appr
+
+    return _as_json(appr.approvals_status())
+
+
 # ------------------------------------------------------------------ knowledge retrieval (RAG)
 
 
@@ -704,6 +776,18 @@ def tool_rag_index(path: str | None = None) -> str:
 def tool_rag_status() -> str:
     """Knowledge index status: number of documents, chunks, terms indexed."""
     return _as_json(_rag_module().rag_status())
+
+
+def tool_rag_drift() -> str:
+    """Data-drift check: compares the on-disk knowledge corpus with the index,
+    reporting added/changed/removed documents and a FRESH/STALE verdict."""
+    return _as_json(_rag_module().rag_drift())
+
+
+def tool_rag_graph() -> str:
+    """Knowledge-graph-lite: salient-term co-occurrence graph over the corpus
+    (for topic clustering and query expansion)."""
+    return _as_json(_rag_module().rag_graph())
 
 
 # ------------------------------------------------------------------ option chain intelligence
@@ -834,6 +918,7 @@ MARKET_TOOLS: list[Tool] = [
     Tool("market_indices", "List tracked market indices (NIFTY 50, SENSEX, etc.) with change and status.", tool_market_indices, {"type": "object", "properties": {}}),
     Tool("market_quote", "Get a stock quote (price, change, market cap, valuation) by symbol.", tool_market_quote, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
     Tool("market_stocks", "List all stocks in the tracked market universe.", tool_market_stocks, {"type": "object", "properties": {}}),
+    Tool("market_orderbook", "Live market-depth orderbook for a stock (5 levels), source-labelled with mock fallback.", tool_market_orderbook, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
     Tool("market_technical", "Technical analysis of a stock: trend, momentum, volatility, volume, support/resistance.", tool_market_technical, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
     Tool("market_fundamental", "Fundamental view of a stock: valuation, profitability, leverage, dividend yield.", tool_market_fundamental, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
     Tool("market_score", "Transparent factor score (0-100) for a stock with per-factor evidence.", tool_market_score, {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}),
@@ -880,6 +965,7 @@ RISK_TOOLS: list[Tool] = [
     Tool("paper_portfolio", "Show the simulated paper-trading portfolio (positions, cash, P&L).", tool_paper_portfolio, {"type": "object", "properties": {}}),
     Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
     Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+    Tool("risk_daily_limit", "Daily-loss circuit breaker status (day, equity, loss, limit, tripped). Read-only; when tripped no new positions are allowed today.", tool_risk_daily_limit, {"type": "object", "properties": {}}),
 ]
 
 BROKER_TOOLS: list[Tool] = [
@@ -897,4 +983,16 @@ RAG_TOOLS: list[Tool] = [
     Tool("rag_query", "Retrieve relevant knowledge chunks (SEBI/NSE rules, broker API docs, risk policies, strategy docs) for a question; ground answers in these and cite the source.", tool_rag_query, {"type": "object", "properties": {"question": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["question"]}),
     Tool("rag_index", "Rebuild the knowledge index from the corpus directory (optionally a different directory).", tool_rag_index, {"type": "object", "properties": {"path": {"type": "string"}}}),
     Tool("rag_status", "Knowledge index status: documents, chunks, terms, index file.", tool_rag_status, {"type": "object", "properties": {}}),
+    Tool("rag_drift", "Data-drift check: corpus vs index (added/changed/removed documents, FRESH/STALE).", tool_rag_drift, {"type": "object", "properties": {}}),
+    Tool("rag_graph", "Knowledge-graph-lite: salient-term co-occurrence graph over the corpus.", tool_rag_graph, {"type": "object", "properties": {}}),
+]
+
+COMPLIANCE_TOOLS: list[Tool] = [
+    Tool("compliance_status", "SEBI algo-framework compliance posture: broker mode, readiness, algo-ID tagging, rate limit, audit trail. Read-only.", tool_compliance_status, {"type": "object", "properties": {}}),
+]
+
+APPROVAL_TOOLS: list[Tool] = [
+    Tool("order_draft", "Mode A: park an order DRAFT for human approval before any execution. No order is sent until approved. Set kind='broker' for broker orders (fail-closed) or 'paper' for simulation. Requires ORDER_APPROVAL_MODE=on.", tool_order_draft, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}, "transaction_type": {"type": "string", "enum": ["BUY", "SELL"]}, "order_type": {"type": "string", "enum": ["MARKET", "LIMIT", "SL", "SL-M"]}, "product": {"type": "string", "enum": ["I", "D"]}, "price": {"type": "number"}, "trigger_price": {"type": "number"}, "kind": {"type": "string", "enum": ["paper", "broker"]}}, "required": ["symbol", "quantity", "transaction_type"]}),
+    Tool("order_approvals", "List order drafts currently awaiting human approval (Mode A).", tool_order_approvals, {"type": "object", "properties": {}}),
+    Tool("order_approval_status", "Mode A approval-flow status (enabled, pending, files).", tool_order_approval_status, {"type": "object", "properties": {}}),
 ]

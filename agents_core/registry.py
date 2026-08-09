@@ -4,7 +4,9 @@ from __future__ import annotations
 from .agent import Agent
 from .prompts import AGENTS
 from .tools import (
+    APPROVAL_TOOLS,
     BROKER_TOOLS,
+    COMPLIANCE_TOOLS,
     FINANCE_TOOLS,
     GMAIL_TOOLS,
     JOBSEARCH_TOOLS,
@@ -16,13 +18,13 @@ from .tools import (
 )
 
 _EXTRA_TOOLS = {
-    "commander": FINANCE_TOOLS + JOBSEARCH_TOOLS + GMAIL_TOOLS + MARKET_TOOLS + OPTION_TOOLS + BROKER_TOOLS + RAG_TOOLS,
+    "commander": FINANCE_TOOLS + JOBSEARCH_TOOLS + GMAIL_TOOLS + MARKET_TOOLS + OPTION_TOOLS + BROKER_TOOLS + RAG_TOOLS + COMPLIANCE_TOOLS + APPROVAL_TOOLS,
     "finance": FINANCE_TOOLS,
     "jobsearch": JOBSEARCH_TOOLS,
     "exec": GMAIL_TOOLS,
     "bd": GMAIL_TOOLS,
-    "market": MARKET_TOOLS + OPTION_TOOLS + RAG_TOOLS,
-    "risk": RISK_TOOLS + BROKER_TOOLS + RAG_TOOLS,
+    "market": MARKET_TOOLS + OPTION_TOOLS + RAG_TOOLS + APPROVAL_TOOLS,
+    "risk": RISK_TOOLS + BROKER_TOOLS + RAG_TOOLS + COMPLIANCE_TOOLS + APPROVAL_TOOLS,
 }
 
 

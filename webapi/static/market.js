@@ -67,6 +67,9 @@ window.MarketClient = (() => {
     paperPortfolio: () => get("/paper-trading/portfolio"),
     paperBuy: (symbol, quantity) => post("/paper-trading/buy" + qs({ symbol, quantity })),
     paperSell: (symbol, quantity) => post("/paper-trading/sell" + qs({ symbol, quantity })),
+    tradingStatus: () => get("/trading/status"),
+    tradingStart: (interval, agent) => post("/trading/start" + qs({ interval, agent })),
+    tradingStop: () => post("/trading/stop"),
     qs,
   };
 })();
