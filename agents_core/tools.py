@@ -594,6 +594,118 @@ def tool_paper_sell(symbol: str, quantity: int) -> str:
     return _market_module().paper_sell(symbol, quantity)
 
 
+# ------------------------------------------------------------------ broker execution (Upstox)
+
+
+def _broker_module():
+    from . import upstox as u
+
+    return u
+
+
+def _broker_manager():
+    return _broker_module().OrderManager()
+
+
+def _as_json(data) -> str:
+    import json as _json
+
+    try:
+        return _json.dumps(data, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        return str(data)
+
+
+def tool_broker_status() -> str:
+    """Read-only broker status. Always safe (no gate needed)."""
+    return _as_json(_broker_manager().status())
+
+
+def tool_broker_place(
+    symbol: str,
+    quantity: int,
+    transaction_type: str,
+    order_type: str = "MARKET",
+    product: str = "I",
+    price: float = 0.0,
+    trigger_price: float = 0.0,
+) -> str:
+    """Place a broker order via Upstox. Fail-closed: refused unless UPSTOX_MODE
+    is configured; live orders also require LIVE_TRADING_ENABLED=true."""
+    return _as_json(_broker_manager().place(
+        symbol=symbol,
+        quantity=quantity,
+        transaction_type=transaction_type,
+        order_type=order_type,
+        product=product,
+        price=price,
+        trigger_price=trigger_price,
+    ))
+
+
+def tool_broker_modify(order_id: str, quantity: int | None = None,
+                       price: float | None = None,
+                       trigger_price: float | None = None) -> str:
+    return _as_json(_broker_manager().modify(
+        order_id, quantity=quantity, price=price, trigger_price=trigger_price))
+
+
+def tool_broker_cancel(order_id: str) -> str:
+    return _as_json(_broker_manager().cancel(order_id))
+
+
+def tool_broker_order_status(order_id: str) -> str:
+    return _as_json(_broker_manager().order_status(order_id))
+
+
+def tool_broker_portfolio() -> str:
+    return _as_json(_broker_manager().portfolio())
+
+
+def tool_broker_audit() -> str:
+    """Broker order audit trail (SEBI retention-ready)."""
+    import json as _json
+
+    f = _broker_module().broker_audit_file()
+    if not f.exists():
+        return _as_json({"lines": 0, "file": str(f)})
+    lines = f.read_text(encoding="utf-8").strip().splitlines()
+    return _as_json({"lines": len(lines), "file": str(f), "tail": [json.loads(l) for l in lines[-5:]]})
+
+
+def tool_broker_reconcile() -> str:
+    """Reconcile internal expected positions vs broker-reported positions.
+    FAIL-CLOSED: refused when the broker is OFF. Verdict: MATCHED / DRIFT / FLAT."""
+    return _as_json(_broker_module().reconcile())
+
+
+# ------------------------------------------------------------------ knowledge retrieval (RAG)
+
+
+def _rag_module():
+    from . import rag as r
+
+    return r
+
+
+def tool_rag_query(question: str, top_k: int = 5) -> str:
+    """Retrieve the most relevant knowledge chunks for a question from the
+    indexed corpus (SEBI/NSE rules, broker API docs, risk policies, strategy
+    docs, playbooks). Answers should be grounded in these chunks and cited."""
+    return _as_json(_rag_module().rag_query(question, top_k))
+
+
+def tool_rag_index(path: str | None = None) -> str:
+    """Rebuild the knowledge index from the corpus directory (optionally a
+    different directory). New/changed documents are picked up."""
+    return _as_json(_rag_module().rag_index(path))
+
+
+def tool_rag_status() -> str:
+    """Knowledge index status: number of documents, chunks, terms indexed."""
+    return _as_json(_rag_module().rag_status())
+
+
 # ------------------------------------------------------------------ option chain intelligence
 
 
@@ -768,4 +880,21 @@ RISK_TOOLS: list[Tool] = [
     Tool("paper_portfolio", "Show the simulated paper-trading portfolio (positions, cash, P&L).", tool_paper_portfolio, {"type": "object", "properties": {}}),
     Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
     Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
+]
+
+BROKER_TOOLS: list[Tool] = [
+    Tool("broker_status", "Read-only broker status (mode, ready, algo id, rate cap). Safe to call anytime.", tool_broker_status, {"type": "object", "properties": {}}),
+    Tool("broker_place", "Place a broker order via Upstox. FAIL-CLOSED: refused unless UPSTOX_MODE is configured; live orders also require LIVE_TRADING_ENABLED=true. Prefer paper_buy/paper_sell for simulation.", tool_broker_place, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}, "transaction_type": {"type": "string", "enum": ["BUY", "SELL"]}, "order_type": {"type": "string", "enum": ["MARKET", "LIMIT", "SL", "SL-M"]}, "product": {"type": "string", "enum": ["I", "D"]}, "price": {"type": "number"}, "trigger_price": {"type": "number"}}, "required": ["symbol", "quantity", "transaction_type"]}),
+    Tool("broker_modify", "Modify an open broker order by order_id.", tool_broker_modify, {"type": "object", "properties": {"order_id": {"type": "string"}, "quantity": {"type": "integer"}, "price": {"type": "number"}, "trigger_price": {"type": "number"}}, "required": ["order_id"]}),
+    Tool("broker_cancel", "Cancel an open broker order by order_id.", tool_broker_cancel, {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}),
+    Tool("broker_order_status", "Get the status/details of a broker order by order_id.", tool_broker_order_status, {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]}),
+    Tool("broker_portfolio", "Broker positions, holdings and funds (read-only).", tool_broker_portfolio, {"type": "object", "properties": {}}),
+    Tool("broker_audit", "Broker order audit trail (SEBI retention-ready, hash-chained).", tool_broker_audit, {"type": "object", "properties": {}}),
+    Tool("broker_reconcile", "Reconcile internal expected positions vs broker positions. FAIL-CLOSED when broker OFF. Verdict: MATCHED / DRIFT / FLAT.", tool_broker_reconcile, {"type": "object", "properties": {}}),
+]
+
+RAG_TOOLS: list[Tool] = [
+    Tool("rag_query", "Retrieve relevant knowledge chunks (SEBI/NSE rules, broker API docs, risk policies, strategy docs) for a question; ground answers in these and cite the source.", tool_rag_query, {"type": "object", "properties": {"question": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["question"]}),
+    Tool("rag_index", "Rebuild the knowledge index from the corpus directory (optionally a different directory).", tool_rag_index, {"type": "object", "properties": {"path": {"type": "string"}}}),
+    Tool("rag_status", "Knowledge index status: documents, chunks, terms, index file.", tool_rag_status, {"type": "object", "properties": {}}),
 ]

@@ -237,6 +237,8 @@ Option Chain Intelligence (NIFTY/BANKNIFTY/FINNIFTY/SENSEX, NSE India):
   alternatives (spreads). Never frame option premium as "safe income".
 - Option paper trades (option_paper_open / option_paper_positions) are simulated only.
   There is NO automated or live option trading in this system.
+- Ground regulatory questions in the knowledge corpus: use rag_query for SEBI/NSE/BSE
+  rules, broker API docs and internal strategy/risk policies; cite the source chunk.
 - write_file any detailed option report under outputs/market/options/.
 """
 
@@ -254,6 +256,8 @@ Rules:
 - Use market_signal only as one input, never as a standalone reason to take a trade.
 - Paper trades are simulated (paper_portfolio / paper_buy / paper_sell); there is no real-money
   path here.
+- Ground risk and compliance questions in the knowledge corpus (rag_query) — SEBI algo rules,
+  risk policy, exposure and daily-loss limits; cite the source chunk.
 - Repeat that this is risk analysis on live Moneycontrol data (or delayed demo fallback when the
   feed is offline), not investment advice.
 - write_file any risk report under outputs/risk/.

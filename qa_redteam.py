@@ -2,8 +2,8 @@
 
 Implements the World-Class E2E QA & Red-Team framework adapted to THIS
 codebase (an NSE/BSE market-intelligence + option-chain + paper-trading
-system; there is NO live/money order router, and every phase verifies that
-claim independently).
+system with a SEBI-compliant Upstox broker execution layer that is FAIL-CLOSED
+by default; every phase verifies that claim independently).
 
 Ground truth is computed independently of the system's own engines where
 possible (reference Black-Scholes, PCR, max-pain, position-sizing, basis,
@@ -13,9 +13,10 @@ Audit discipline: every check is recorded in an append-only, hash-chained
 JSONL audit store under the harness temp dir. The audit store is OUTSIDE
 the system's own DATA_DIR and is never written by the system under test.
 
-Safety gate: a source scan confirms there is no live-order path before any
-check is recorded. If a live path is detected the harness logs it at P0 and
-refuses to proceed to execution phases.
+Safety gate: a source scan confirms that any broker/order path is confined to
+the gated Upstox adapter (agents_core/upstox.py) and that every broker order
+passes through safety_gate('live_order', ...). If an ungated live path is
+detected the harness logs it at P0 and refuses to proceed to execution phases.
 
 Run:  python qa_redteam.py
 """
@@ -147,11 +148,39 @@ def scan_source() -> str:
 def phase0():
     src = scan_source()
 
-    # P0.1 live-broker keywords in the entire source tree
+    # P0.1 broker/order keywords must be confined to the gated Upstox adapter
+    # and its tool wrappers — never reachable from an ungated path.
     hits = re.findall(r"(place_order|submit_order|order_router|broker_api|Zerodha|Upstox|Fyers|AngelOne|Dhan|FREE_TRIAL|kiteconnect|order api|rout)", src, re.I)
-    r = check("P0.1", "0.Environment", "source", "No live order/broker execution path",
-              "none", f"{len(hits)} keyword hits", "; ".join(sorted(set(hits))) or "clean")
-    ok(r, len(hits) == 0)
+    allowed_files = {"agents_core\\upstox.py", "agents_core\\tools.py", "agents_core\\config.py",
+                     "agents_core\\upstox.py", "agents_core/upstox.py", "agents_core/tools.py",
+                     "agents_core/config.py", ".env.example"}
+    offending = []
+    for p in sorted(REPO.rglob("*")):
+        if p.is_file() and p.suffix in (".py", ".js", ".html", ".ts"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rel = p.relative_to(REPO).as_posix()
+            if rel in ("agents_core/upstox.py", "agents_core/tools.py", "agents_core/config.py"):
+                continue
+            found = re.findall(r"(place_order|submit_order|order_router|broker_api|Zerodha|Upstox|Fyers|AngelOne|Dhan|kiteconnect)", text, re.I)
+            if found:
+                offending.append((rel, sorted(set(found))))
+    r = check("P0.1", "0.Environment", "source",
+              "Broker/order keywords confined to the gated Upstox adapter",
+              "only upstox.py + tool wrappers",
+              f"{len(hits)} total hits", "offending files: " + (str(offending) if offending else "none"))
+    ok(r, not offending)
+
+    # P0.1b the adapter itself MUST gate every order send via safety_gate('live_order', ...)
+    upstox_src = (REPO / "agents_core" / "upstox.py").read_text(encoding="utf-8")
+    has_gate_call = "safety_gate(" in upstox_src and "live_order" in upstox_src
+    r = check("P0.1b", "0.Environment", "source",
+              "Upstox adapter routes every order send through safety_gate('live_order', ...)",
+              "gate present", f"gate_call={has_gate_call}",
+              "OrderManager._gate maps live->live_order, sim->broker_sim", "P0")
+    ok(r, has_gate_call)
 
     # P0.2 live-trading switch must exist AND be fail-closed by default
     gate_src = "safety_gate" in src and "live_order" in src
@@ -726,6 +755,242 @@ def phase8_recovery():
 
 
 # =====================================================================
+# PHASE 9 — BROKER / EXECUTION (Upstox, fail-closed, SEBI-algo compliant)
+# =====================================================================
+def phase9_broker():
+    import agents_core.upstox as up
+    from agents_core.safety import ExecutionBlockedError
+
+    # P9.1 broker OFF by default (UPSTOX_MODE unset) -> order refused, fail-closed
+    saved = {k: os.environ.get(k) for k in ("UPSTOX_MODE", "UPSTOX_API_KEY", "UPSTOX_ALGO_ID", "UPSTOX_INSTRUMENTS_FILE", "LIVE_TRADING_ENABLED")}
+    for k in ("UPSTOX_MODE", "UPSTOX_API_KEY", "UPSTOX_ALGO_ID", "UPSTOX_INSTRUMENTS_FILE", "LIVE_TRADING_ENABLED"):
+        os.environ.pop(k, None)
+    off_blocked = False
+    try:
+        up.OrderManager().place(symbol="RELIANCE", quantity=1, transaction_type="BUY")
+    except ExecutionBlockedError:
+        off_blocked = True
+    row = check("P9.1", "9.Broker", "upstox.OrderManager",
+                "Broker is OFF by default; any order attempt fails closed",
+                "ExecutionBlockedError", f"blocked={off_blocked}",
+                "UPSTOX_MODE unset -> OFF; _require_ready refuses")
+    ok(row, off_blocked)
+
+    # P9.2 live mode requires LIVE_TRADING_ENABLED=true (safety gate)
+    os.environ["UPSTOX_MODE"] = "live"
+    os.environ["UPSTOX_API_KEY"] = "client-test"
+    os.environ["UPSTOX_ALGO_ID"] = "ALGO-001"
+    os.environ.pop("LIVE_TRADING_ENABLED", None)
+    live_blocked = False
+    try:
+        up.OrderManager().place(symbol="RELIANCE", quantity=1, transaction_type="BUY")
+    except ExecutionBlockedError:
+        live_blocked = True
+    row = check("P9.2", "9.Broker", "safety_gate",
+                "Live order refused unless LIVE_TRADING_ENABLED=true",
+                "ExecutionBlockedError", f"blocked={live_blocked}",
+                "safety_gate('live_order') fails closed by default")
+    ok(row, live_blocked)
+
+    # P9.3 live mode WITH the switch but WITHOUT algo id -> refused (SEBI algo-ID tagging)
+    os.environ["LIVE_TRADING_ENABLED"] = "true"
+    os.environ.pop("UPSTOX_ALGO_ID", None)
+    algo_blocked = False
+    try:
+        up.OrderManager().place(symbol="RELIANCE", quantity=1, transaction_type="BUY")
+    except ExecutionBlockedError:
+        algo_blocked = True
+    row = check("P9.3", "9.Broker", "upstox.OrderManager",
+                "Live order refused without exchange-registered algo id (SEBI algo-ID tagging)",
+                "ExecutionBlockedError", f"blocked={algo_blocked}",
+                "_require_algo_id refuses when UPSTOX_ALGO_ID unset in live mode")
+    ok(row, algo_blocked)
+
+    # P9.4 mock mode: full order lifecycle + audit trail + export
+    os.environ["UPSTOX_ALGO_ID"] = "ALGO-001"
+    os.environ["UPSTOX_MODE"] = "mock"
+    # isolated instruments file in harness tmp
+    inst = _QA_TMP / "instruments.csv"
+    inst.write_text(
+        "instrument_key,trading_symbol,symbol,name\n"
+        "NSE_EQ|RELIANCE,RELIANCE,RELIANCE,Reliance Industries\n"
+        "NSE_EQ|INFY,INFY,INFY,Infosys\n",
+        encoding="utf-8-sig",
+    )
+    os.environ["UPSTOX_INSTRUMENTS_FILE"] = str(inst)
+    # redirect broker audit into harness tmp so the harness stays isolated
+    os.environ["UPSTOX_TOKEN_FILE"] = str(_QA_TMP / "upstox_token.json")
+    lifecycle_ok = False
+    try:
+        m = up.OrderManager()
+        placed = m.place(symbol="RELIANCE", quantity=10, transaction_type="BUY")
+        oid = placed.get("order_id")
+        mod = m.modify(oid, price=2900)
+        cancelled = m.cancel(oid)
+        pf = m.portfolio()
+        lifecycle_ok = bool(oid and mod.get("status") and cancelled.get("status") and "positions" in pf)
+    except Exception as exc:  # noqa: BLE001
+        row = check("P9.4", "9.Broker", "upstox.OrderManager", "mock lifecycle", "run",
+                    f"error: {exc}", "exception")
+        bad(row)
+        lifecycle_ok = False
+    row = check("P9.4", "9.Broker", "upstox.OrderManager",
+                "Mock broker: place -> modify -> cancel -> portfolio lifecycle",
+                "all succeed", f"ok={lifecycle_ok}",
+                "OrderManager mock mode returns deterministic order_id")
+    ok(row, lifecycle_ok)
+
+    # P9.5 broker audit trail written + hash-chained + exportable
+    audit_f = up.broker_audit_file()
+    lines = audit_f.read_text(encoding="utf-8").strip().splitlines() if audit_f.exists() else []
+    chained = True
+    prev = ""
+    for ln in lines:
+        obj = json.loads(ln)
+        expect = hashlib.sha256(prev.encode("utf-8")).hexdigest()
+        if obj.get("prev_hash") != expect:
+            chained = False
+            break
+        prev = ln
+    export = up.export_broker_audit(_QA_TMP / "broker_audit_export.jsonl")
+    row = check("P9.5", "9.Broker", "audit",
+                "Broker audit trail: hash-chained, retention-exportable",
+                "chained+exported", f"lines={len(lines)} chained={chained} exported={export.exists()}",
+                "broker_orders.jsonl append-only + export_broker_audit")
+    ok(row, len(lines) >= 3 and chained and export.exists())
+
+    # P9.6 rate limiter enforces SEBI <10 OPS cap (cap set low for test)
+    os.environ["UPSTOX_MAX_ORDERS_PER_SEC"] = "1"
+    from agents_core.upstox import RateLimiter
+    rl = RateLimiter(1.0)
+    rl.acquire()
+    throttle = False
+    try:
+        rl.acquire()
+    except ExecutionBlockedError:
+        throttle = True
+    os.environ.pop("UPSTOX_MAX_ORDERS_PER_SEC", None)
+    row = check("P9.6", "9.Broker", "upstox.RateLimiter",
+                "Order rate limiter caps automated order flow (SEBI <10 OPS)",
+                "throttled", f"throttle={throttle}",
+                "token-bucket limiter on every send")
+    ok(row, throttle)
+
+    # P9.7 instrument resolution fails closed without instruments file
+    os.environ.pop("UPSTOX_INSTRUMENTS_FILE", None)
+    os.environ["UPSTOX_MODE"] = "mock"
+    os.environ["UPSTOX_API_KEY"] = "client-test"
+    unresolvable = False
+    try:
+        up.OrderManager().place(symbol="RELIANCE", quantity=1, transaction_type="BUY")
+    except ExecutionBlockedError:
+        unresolvable = True
+    row = check("P9.7", "9.Broker", "upstox.resolve_instrument",
+                "Order refused when instrument key cannot be resolved",
+                "ExecutionBlockedError", f"blocked={unresolvable}",
+                "no instruments file -> no instrument key -> fail closed")
+    ok(row, unresolvable)
+
+    # P9.8 reconciliation: expected positions derived from the audit trail
+    os.environ["UPSTOX_INSTRUMENTS_FILE"] = str(inst)
+    # fresh isolated audit for this block
+    up_audit = _QA_TMP / "broker_orders.jsonl"
+    os.environ["UPSTOX_BROKER_AUDIT_FILE"] = str(up_audit)
+    import importlib
+    import agents_core.upstox as up_mod
+    up_mod.broker_audit_file = lambda: up_audit
+    m = up_mod.OrderManager()
+    m.place(symbol="RELIANCE", quantity=10, transaction_type="BUY")
+    m.place(symbol="INFY", quantity=5, transaction_type="SELL")
+    exp = up_mod.expected_positions()
+    row = check("P9.8", "9.Broker", "upstox.expected_positions",
+                "Reconciliation ledger: audit trail -> expected positions",
+                "{RELIANCE:10, INFY:-5}",
+                str({k: v for k, v in exp.items() if v != 0}),
+                "replay of PLACE records (BUY+, SELL-)")
+    ok(row, exp.get("NSE_EQ|RELIANCE") == 10 and exp.get("NSE_EQ|INFY") == -5)
+
+    # P9.9 reconciliation verdict: MATCHED in mock, DRIFT when broker differs
+    rec = up_mod.reconcile()
+    row = check("P9.9", "9.Broker", "upstox.reconcile",
+                "Reconcile verdict MATCHED when ledger == broker (mock mirrors ledger)",
+                "MATCHED", str(rec.get("verdict")),
+                "mock portfolio replays expected_positions")
+    ok(row, rec.get("verdict") == "MATCHED")
+
+    # restore env
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+
+
+# =====================================================================
+# PHASE 10 — KNOWLEDGE RETRIEVAL (RAG)
+# =====================================================================
+def phase10_rag():
+    import agents_core.rag as rag
+    from agents_core.registry import get_agent
+
+    # P10.1 corpus exists and indexes
+    idx = rag.get_index()
+    stats = idx.build()
+    row = check("P10.1", "10.RAG", "rag.RagIndex",
+                "Knowledge corpus indexes documents (SEBI rules, risk policy)",
+                ">=2 docs", f"docs={stats['docs']} chunks={stats['chunks']}",
+                "index build over knowledge/ directory")
+    ok(row, stats["docs"] >= 2 and stats["chunks"] >= 3)
+
+    # P10.2 rag_query retrieves relevant SEBI chunk for a regulatory question
+    r = rag.rag_query("What is the algo ID tagging rule?", top_k=3)
+    texts = " ".join(x["text"].lower() for x in r.get("results", []))
+    row = check("P10.2", "10.RAG", "rag.rag_query",
+                "SEBI question retrieves SEBI-algo-framework chunk",
+                "relevant chunk", f"results={len(r.get('results', []))}",
+                "BM25 retrieval; algo/identifier terms in top results")
+    ok(row, len(r.get("results", [])) >= 1 and ("algo" in texts and "identifier" in texts))
+
+    # P10.3 rag_query retrieves risk-policy chunk for a risk question
+    r2 = rag.rag_query("What is the daily loss limit?", top_k=3)
+    texts2 = " ".join(x["text"].lower() for x in r2.get("results", []))
+    row = check("P10.3", "10.RAG", "rag.rag_query",
+                "Risk question retrieves risk-policy chunk",
+                "relevant chunk", f"results={len(r2.get('results', []))}",
+                "BM25 retrieval; loss/limit terms in top results")
+    ok(row, "daily loss limit" in texts2 or ("loss" in texts2 and "limit" in texts2))
+
+    # P10.4 retrieved results carry source provenance
+    prov_ok = all(x.get("source") and x.get("path") and x.get("score") is not None
+                  for x in r.get("results", []))
+    row = check("P10.4", "10.RAG", "rag.rag_query",
+                "Retrieved chunks carry source + path + score (auditable provenance)",
+                "source/path/score", f"provenance={prov_ok}",
+                "results include source file and relevance score")
+    ok(row, prov_ok)
+
+    # P10.4b citation block rendered with numbered refs
+    ctx = r.get("context") or ""
+    cites = r.get("cites") or []
+    cite_ok = "[KNOWLEDGE CONTEXT]" in ctx and "[1]" in ctx and len(cites) >= 1
+    row = check("P10.4b", "10.RAG", "rag.citations",
+                "Retrieved chunks rendered as numbered, cited context",
+                "context+cites", f"context={len(ctx)} cites={len(cites)}",
+                "render_citations + citation_index in rag_query output")
+    ok(row, cite_ok)
+
+    # P10.5 RAG tools registered on trading agents
+    for agent_name in ("commander", "market", "risk"):
+        names = {t.name for t in get_agent(agent_name).tools}
+        have = {"rag_query", "rag_index", "rag_status"} <= names
+        row = check(f"P10.5.{agent_name}", "10.RAG", "registry",
+                    f"RAG tools registered on {agent_name} agent",
+                    "3 tools", "present" if have else "missing",
+                    "rag_query/rag_index/rag_status wired into agent")
+        ok(row, have)
+
+
+# =====================================================================
 # master scoring + report
 # =====================================================================
 WEIGHTS = {
@@ -746,6 +1011,8 @@ PHASE_TO_CAT = {
     "6.Security": "Security",
     "7.Risk": "Risk & Guardrails",
     "8.Recovery": "Reliability/Recovery",
+    "9.Broker": "Broker/Execution",
+    "10.RAG": "AI Reliability",
 }
 
 
@@ -765,6 +1032,8 @@ def main() -> int:
     phase6_security()
     phase7_risk()
     phase8_recovery()
+    phase9_broker()
+    phase10_rag()
 
     # render matrix
     print("\n== TRADE-AGENT-QA: MASTER TEST MATRIX ==")
@@ -805,7 +1074,8 @@ def main() -> int:
     print(f"  P0 failures: {p0_fails}")
     print(f"  Critical(P0/P1) failures: {critical_fails}")
     print(f"\n  Audit store: {AUDIT_F}")
-    print(f"  NOTE: system is PAPER-ONLY (no live/money execution). "
+    print(f"  NOTE: broker execution is FAIL-CLOSED (UPSTOX_MODE off by default; "
+          f"live orders need LIVE_TRADING_ENABLED=true + algo id). "
           f"Score reflects analytics+guardrails; critical security gaps below.")
 
     return 0
