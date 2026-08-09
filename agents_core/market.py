@@ -512,7 +512,9 @@ class UpstoxMarketProvider:
             from . import upstox as u
 
             cfg = u.get_broker_settings()
-            if cfg.mode not in (u.MODE_SANDBOX, u.MODE_LIVE) or not cfg.api_key:
+            # Market data is only served in LIVE mode. Sandbox is order-only, so
+            # the quote feed falls back to Moneycontrol there (no wasted calls).
+            if cfg.mode != u.MODE_LIVE or not cfg.api_key:
                 return False
             tok = u.SessionManager(cfg).ensure_access_token()
             return bool(tok)

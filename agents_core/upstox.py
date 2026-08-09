@@ -33,6 +33,7 @@ live     Real-money broker. Requires ``UPSTOX_MODE=live`` AND
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -98,6 +99,8 @@ def get_broker_settings() -> BrokerSettings:
         max_ops = float(_env("UPSTOX_MAX_ORDERS_PER_SEC", "5") or 5)
     except ValueError:
         max_ops = 5.0
+    default_base = ("https://api-sandbox.upstox.com" if mode == MODE_SANDBOX
+                    else "https://api-hft.upstox.com")
     return BrokerSettings(
         mode=mode,
         api_key=_env("UPSTOX_API_KEY"),
@@ -107,7 +110,7 @@ def get_broker_settings() -> BrokerSettings:
         access_token=_env("UPSTOX_ACCESS_TOKEN"),
         refresh_token=_env("UPSTOX_REFRESH_TOKEN"),
         token_file=Path(token_file) if token_file else DATA_DIR / "upstox_token.json",
-        base_url=_env("UPSTOX_BASE_URL", "https://api-hft.upstox.com"),
+        base_url=_env("UPSTOX_BASE_URL", default_base),
         algo_id=_env("UPSTOX_ALGO_ID"),
         max_orders_per_sec=max_ops,
         instruments_file=instruments,
@@ -292,6 +295,34 @@ class UpstoxClient:
             params={"instrument_key": instrument_key},
         )
 
+    def instruments(self, exchange: str = "NSE") -> list[dict[str, str]]:
+        """Download the beginning-of-day instruments master (gzipped JSON).
+
+        Upstox serves the instruments file as public gzipped JSON (the CSV/API
+        endpoints are deprecated). Rows carry ``instrument_key`` / ``trading_symbol``
+        so symbol resolution works without a manually supplied CSV.
+        """
+        url = f"https://assets.upstox.com/market-quote/instruments/exchange/{exchange}.json.gz"
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"Accept-Encoding": "gzip"})
+        if resp.status_code >= 400:
+            raise ExecutionBlockedError(
+                f"Upstox instruments {exchange} -> HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+        raw = gzip.decompress(resp.content)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise ExecutionBlockedError(
+                f"upstox instruments parse failed for {exchange}: {exc}"
+            ) from exc
+        rows: list[dict[str, str]] = []
+        for item in payload if isinstance(payload, list) else []:
+            if not isinstance(item, dict):
+                continue
+            rows.append({k: str(v) for k, v in item.items()})
+        return rows
+
 
 # --------------------------------------------------------------------------- audit
 
@@ -329,14 +360,45 @@ def export_broker_audit(dest: str | Path) -> Path:
 # --------------------------------------------------------------------------- instruments
 
 
-def load_instruments(path: str | Path | None = None) -> list[dict[str, str]]:
-    """Parse the broker-provided BOD instruments file (CSV). Empty if not configured."""
-    p = Path(path) if path else None
-    if p is None:
-        cfg = get_broker_settings()
-        p = Path(cfg.instruments_file) if cfg.instruments_file else None
-    if not p or not p.exists():
+def instruments_cache_file() -> Path:
+    return DATA_DIR / "upstox_instruments.json"
+
+
+def download_instruments(exchange: str = "NSE",
+                         cache: str | Path | None = None) -> Path:
+    """Download + cache the Upstox instruments master (gzipped JSON, public URL).
+
+    Used automatically by ``load_instruments`` when no BOD file is configured, so
+    live quotes/orders resolve symbols to instrument keys without a manual file.
+    The cache is day-scoped: a stale cache is refreshed.
+    """
+    out = Path(cache) if cache else instruments_cache_file()
+    if out.exists() and out.stat().st_mtime >= time.time() - 24 * 3600:
+        return out
+    rows = UpstoxClient(get_broker_settings(), "").instruments(exchange)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        out.write_text(
+            json.dumps(rows, ensure_ascii=False), encoding="utf-8"
+        )
+    return out
+
+
+def _parse_instruments_json(p: Path) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
         return []
+    if not isinstance(payload, list):
+        return []
+    return [{k: str(v) for k, v in item.items()}
+            for item in payload if isinstance(item, dict)]
+
+
+_INSTRUMENTS_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
+
+
+def _parse_instruments_csv(p: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     try:
         with open(p, encoding="utf-8-sig", newline="") as fh:
@@ -353,6 +415,43 @@ def load_instruments(path: str | Path | None = None) -> list[dict[str, str]]:
             rows.append(dict(zip(header, cells)))
     except Exception:  # noqa: BLE001
         return []
+    return rows
+
+
+def load_instruments(path: str | Path | None = None) -> list[dict[str, str]]:
+    """Parse the broker-provided BOD instruments file (JSON or legacy CSV).
+
+    Results are cached in-process (keyed by file path + mtime) so repeated
+    symbol lookups in a hot loop (e.g. a full stock-list scan) don't re-parse
+    the ~80k-row master on every call.
+    """
+    p = Path(path) if path else None
+    if p is None:
+        cfg = get_broker_settings()
+        p = Path(cfg.instruments_file) if cfg.instruments_file else None
+    if not p or not p.exists():
+        if path is None and (cfg.mode in (MODE_SANDBOX, MODE_LIVE) and cfg.api_key):
+            try:
+                p = download_instruments()
+            except Exception:  # noqa: BLE001 — resolution falls back to other feeds
+                return []
+    if not p or not p.exists():
+        return []
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    key = str(p)
+    cached = _INSTRUMENTS_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    if p.suffix.lower() in (".json", ".gz"):
+        rows = _parse_instruments_json(p)
+    else:
+        rows = _parse_instruments_csv(p)
+        if not rows:
+            rows = _parse_instruments_json(p)
+    _INSTRUMENTS_CACHE[key] = (mtime, rows)
     return rows
 
 
