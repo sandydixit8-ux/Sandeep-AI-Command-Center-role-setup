@@ -1426,6 +1426,19 @@
     const body = $("#mktBody");
     const subs = { overview: mOverview, brief: mBrief, stocks: mStocks, stock: mStock, screener: mScreener, watchlist: mWatchlist, signals: mSignals, options: mOptions, portfolio: mPortfolio, paper: mPaper, backtest: mBacktest, risk: mRisk, alerts: mAlerts, journal: mJournal, monitoring: mMonitoring, audit: mAudit };
     (subs[sub] || mOverview)(body, route);
+
+    // Auto-refresh market data every 30s while this view is open (re-renders
+    // the current sub-view; cleared on navigation). Idempotent: each sub-view
+    // re-render replaces #mktBody content and rebinds its own polling.
+    if (window.__mktRefresh) clearInterval(window.__mktRefresh);
+    window.__mktRefresh = setInterval(() => {
+      if (!document.body.contains(body)) return;
+      try { ss(body); } catch (e) { /* keep last render on error */ }
+    }, 30000);
+    function ss(bodyEl) {
+      const f = subs[sub] || mOverview;
+      f(bodyEl, route);
+    }
   }
 
   function mktLoading() { return '<div class="empty" style="display:flex"><div class="empty-ic">📈</div><h3>Loading market data…</h3><p>Fetching live data from the Moneycontrol feed.</p></div>'; }

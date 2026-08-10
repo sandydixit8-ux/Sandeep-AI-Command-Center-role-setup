@@ -1335,6 +1335,22 @@ def phase11_new_layers():
                     "RUNNING->STOPPED", f"running={ok_run} stop={sp['status']}",
                     "start() spawns loop; stop() halts and records reason", "P1")
         ok(row, ok_run and sp["status"] == "STOPPED")
+
+        # webapi start accepts an EMPTY body (UI button posts with no JSON)
+        row = check("P11.td.webbody", "11.Layers", "webapi.trading_start",
+                    "Trading start accepts a no-body POST (UI button)",
+                    "RUNNING", "empty body -> RUNNING",
+                    "start button posts without a JSON body; endpoint must not 422", "P1")
+        try:
+            import webapi.app as _wa
+            from agents_core import trading as _tr
+            st = _wa.trading_start()
+            _tr.stop(reason="qa")
+            ok(row, st.get("trading", {}).get("status") == "RUNNING")
+        except Exception as exc:
+            ok(row, False)
+            row["evidence"] = f"error: {exc}"
+            bad(row)
     except Exception as exc:
         row = check("P11.td", "11.Layers", "trading.TradingController", "auto-trading checks", "run",
                     f"error: {exc}", "exception", "P1")

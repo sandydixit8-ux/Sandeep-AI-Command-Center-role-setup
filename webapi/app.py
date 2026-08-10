@@ -546,10 +546,11 @@ def trading_status() -> dict:
 
 
 @app.post("/api/v1/trading/start")
-def trading_start(req: TradingControl) -> dict:
+def trading_start(req: TradingControl | None = None) -> dict:
     from agents_core import trading
     from agents_core.safety import ExecutionBlockedError
 
+    req = req or TradingControl()
     try:
         return {"status": "ok", "trading": trading.start(
             interval=req.interval, agent=req.agent, task=req.task)}
