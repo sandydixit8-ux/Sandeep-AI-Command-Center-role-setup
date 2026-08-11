@@ -70,6 +70,7 @@ window.MarketClient = (() => {
     tradingStatus: () => get("/trading/status"),
     tradingStart: (interval, agent) => post("/trading/start" + qs({ interval, agent })),
     tradingStop: () => post("/trading/stop"),
+    tradingPerformanceToday: () => get("/trading/performance/today"),
     qs,
   };
 })();

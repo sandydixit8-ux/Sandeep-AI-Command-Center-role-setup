@@ -123,6 +123,8 @@
     { view: "chat", ic: "💬", label: "AI Chat" },
     { view: "agents", ic: "🤖", label: "Agents" },
     { view: "market", ic: "📈", label: "Market AI" },
+    { view: "ideas", ic: "💡", label: "Idea Indicator" },
+    { view: "today", ic: "📅", label: "Today Performance" },
     { view: "tasks", ic: "📋", label: "Tasks" },
     { view: "automations", ic: "⚡", label: "Automations" },
     { view: "files", ic: "📁", label: "Files" },
@@ -365,7 +367,7 @@
     const headerTitle = NAV.find(n => n.view === view)?.label || "Home";
     $("#headerTitle").textContent = headerTitle;
 
-    const views = { home, chat, agents, tasks, automations, files, analytics, documents, knowledge, integrations, settings, market };
+    const views = { home, chat, agents, tasks, automations, files, analytics, documents, knowledge, integrations, settings, market, ideaIndicator, todayPerf };
     (views[view] || home)(content, param);
     content.scrollTop = 0;
   }
@@ -1360,6 +1362,269 @@
     $("#secClose").addEventListener("click", closeModal);
   }
 
+  /* ---------------- Idea Indicator ---------------- */
+  // Plain-language layer over the signal endpoints. Every raw signal label,
+  // factor and score is translated into a sentence a non-trader can read.
+  function ideaVerdict(sig) {
+    const s = (sig.signal || "").toUpperCase();
+    if (s.includes("BUY")) return { cls: "ok", icon: "🟢", label: "Strong buy case", plain: "The factors together favour buying — this is one of the stronger setups on the board, but still size it sensibly and respect your stop loss." };
+    if (s.includes("SELL")) return { cls: "err", icon: "🔴", label: "Reduce / be cautious", plain: "Most factors are against holding right now. Consider trimming exposure and waiting for a cleaner setup before acting." };
+    if (s.includes("HOLD") || s.includes("WATCH")) return { cls: "wait", icon: "🟡", label: "Wait and watch", plain: "The factors are mixed — there is no clear edge today. Patience often beats forcing a trade here." };
+    return { cls: "sched", icon: "⚪", label: "No clear edge", plain: "No decisive signal right now. Keep it on the watchlist and revisit when data firms up." };
+  }
+  function ideaConfidence(c) {
+    const v = c || 0;
+    if (v >= 75) return { word: "High conviction", cls: "ok" };
+    if (v >= 50) return { word: "Moderate conviction", cls: "wait" };
+    return { word: "Low conviction", cls: "sched" };
+  }
+  const IDEA_FACTOR_TEXT = [
+    { re: /trend/i, buy: "price is above its moving averages — the trend is with you", sell: "price is trading below its moving averages — the trend is against you" },
+    { re: /momentum|rsi/i, buy: "RSI reads healthy, not overheated — momentum favours strength", sell: "RSI is weak / losing momentum — it favours weakness" },
+    { re: /volume/i, buy: "volume is expanding with the move — the rally has participation", sell: "volume is shrinking / not confirming — the move lacks fuel" },
+    { re: /fundament/i, buy: "valuation and profitability look attractive", sell: "valuation looks stretched or profitability is soft" },
+    { re: /sentiment/i, buy: "news and sentiment tone is positive", sell: "news and sentiment tone is cautious" },
+  ];
+  function ideaFactor(factor, support) {
+    const f = IDEA_FACTOR_TEXT.find(x => x.re.test(factor || "")) || { buy: "this factor leans supportive", sell: "this factor leans negative" };
+    const isBuy = (support || "").toUpperCase().includes("BUY");
+    return { cls: isBuy ? "ok" : "err", text: (isBuy ? f.buy : f.sell), label: factor };
+  }
+  function ideaRegimePlain(r) {
+    if (!r) return "";
+    const reg = (r.regime || "").toLowerCase();
+    if (reg.includes("bull")) return "The market is in an uptrend with broad participation — conditions generally favour the long side, though dips can still hurt.";
+    if (reg.includes("bear")) return "The market is in a downtrend. Defensive positioning and tighter risk are wise until breadth improves.";
+    return (r.tone || "").toLowerCase().includes("risk") ? "The market is range-bound. Directional bets have little edge here — patience and selectivity win." : "The market is range-bound. Directional bets have little edge here.";
+  }
+  function ideaOptLabel(label) {
+    const l = String(label || "").toLowerCase();
+    if (l.includes("strong") && l.includes("bull")) return { cls: "ok", text: "Option writers are strongly tilted bullish — key strikes see heavy call buying / put unwinding." };
+    if (l.includes("bull")) return { cls: "ok", text: "Option writers lean mildly bullish — a modest upward tilt, treat as a tailwind not a verdict." };
+    if (l.includes("strong") && l.includes("bear")) return { cls: "err", text: "Option writers are strongly tilted bearish — key strikes show put building / call unwinding." };
+    if (l.includes("bear")) return { cls: "err", text: "Option writers lean mildly bearish — a modest downward tilt, worth respecting." };
+    return { cls: "wait", text: "Option writers are balanced — no meaningful directional edge from the chain today." };
+  }
+
+  function ideaIndicator(content, param) {
+    const page = '<div class="page" id="ideaPage">' +
+      '<div class="page-header"><div class="page-title">💡 Idea Indicator</div>' +
+      '<div class="page-desc">Every signal in the platform, explained in plain language — what it means, why, and how to act.</div></div>' +
+      '<div id="ideaBody"><div class="empty" style="display:flex"><div class="empty-ic">🧭</div><h3>Scanning signals…</h3><p>Reading the market context and every stock signal.</p></div></div>' +
+      '</div>';
+    content.innerHTML = page;
+    const body = $("#ideaBody");
+
+    const scan = async () => {
+      body.innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">🧭</div><h3>Scanning signals…</h3><p>Reading the market context and every stock signal.</p></div>';
+      try {
+        const [briefR, stocksR] = await Promise.all([
+          window.MarketClient.brief().then(b => ({ ok: true, v: b })).catch(e => ({ ok: false, e })),
+          window.MarketClient.stocks().then(s => ({ ok: true, v: s })).catch(e => ({ ok: false, e })),
+        ]);
+        const brief = briefR.ok ? briefR.v : { regime: { regime: "Sideways", tone: "Mixed", breadth: 0.5 }, summary: "", data_status: "offline", ai_interpretation: "" };
+        const list = stocksR.ok ? stocksR.v : [];
+        const sigs = await Promise.allSettled(list.map(s => window.MarketClient.signal(s.symbol).catch(() => ({ symbol: s.symbol, name: s.name, sector: s.sector, signal: "ERROR", confidence: 0, checks: [], evidence_strength: "Low", supporting: 0, total_factors: 5 }))));
+        const scores = await Promise.allSettled(list.map(s => window.MarketClient.score(s.symbol).catch(() => null)));
+        const opt = await Promise.allSettled(["NIFTY", "BANKNIFTY"].map(u => window.OptionsClient.signal(u).catch(() => null)));
+
+        const board = list.map((s, i) => {
+          const sig = sigs[i] && sigs[i].status === "fulfilled" ? sigs[i].value : null;
+          const sc = scores[i] && scores[i].status === "fulfilled" ? scores[i].value : null;
+          const v = ideaVerdict(sig || { signal: "NO SIGNAL" });
+          const conf = ideaConfidence(sig && sig.confidence);
+          const strength = (sig && sig.evidence_strength) || "Low";
+          const fam = (v.cls === "ok" ? (v.label === "Strong buy case" ? 1 : 0.6) : v.cls === "err" ? -1 : 0);
+          return { symbol: s.symbol, name: s.name, sector: s.sector, sig, sc, v, conf, strength, fam, price: s.price };
+        }).sort((a, b) => b.fam - a.fam || (b.sig ? b.sig.confidence : 0) - (a.sig ? a.sig.confidence : 0));
+
+        const buyCount = board.filter(x => x.v.cls === "ok").length;
+        const sellCount = board.filter(x => x.v.cls === "err").length;
+        const waitCount = board.length - buyCount - sellCount;
+
+        const optR = opt.map((o, i) => ({ u: ["NIFTY", "BANKNIFTY"][i], sig: o.status === "fulfilled" ? o.value : null }));
+
+        const factorChips = (sig) => (sig && sig.checks || []).map(c => {
+          const f = ideaFactor(c.factor, c.support);
+          return '<div class="row" style="margin:5px 0"><span class="badge ' + f.cls + '" style="font-size:11px;min-width:118px">' + (f.cls === "ok" ? "🟢 SUPPORT" : "🔴 AGAINST") + '</span><span class="small grow">' + esc(f.label) + ' — ' + esc(f.text) + '</span></div>';
+        }).join("") || '<div class="muted small">No factor detail returned.</div>';
+
+        const strengthBadge = (st) => '<span class="badge ' + (st === "High" ? "ok" : st === "Moderate" ? "wait" : "sched") + '">Evidence: ' + esc(st) + '</span>';
+
+        const ideaCard = (x, featured) =>
+          '<div class="card ' + (featured ? "hoverable" : "") + '" style="' + (featured ? "border-color:var(--accent)" : "") + '">' +
+            '<div class="spread"><div class="row"><span class="avatar sm">' + x.v.icon + '</span><b>' + esc(x.symbol) + '</b><span class="muted small">' + esc(x.name) + '</span></div>' +
+            '<span class="badge ' + x.v.cls + '" style="font-size:12px;font-weight:700">' + esc(x.v.label) + '</span></div>' +
+            '<div class="card-sub" style="margin:8px 0 4px">' + esc(x.sector || "—") + (x.price ? ' · ₹' + fmtNum(x.price) : "") + '</div>' +
+            '<div class="small" style="line-height:1.5">' + esc(x.v.plain) + '</div>' +
+            '<div class="row" style="margin:8px 0"><span class="muted small">Confidence ' + (x.sig ? x.sig.confidence : 0) + '%</span><span class="badge ' + x.conf.cls + '" style="font-size:11px">' + x.conf.word + '</span>' + strengthBadge(x.strength) + '</div>' +
+            '<div style="height:7px;background:var(--surface-3);border-radius:5px;overflow:hidden"><div style="height:100%;width:' + (x.sig ? x.sig.confidence : 0) + '%;background:' + (x.v.cls === "ok" ? "var(--ok)" : x.v.cls === "err" ? "var(--err)" : "var(--warn)") + ';transition:width .4s"></div></div>' +
+            '<div style="margin-top:10px">' + factorChips(x.sig) + '</div>' +
+            '<div class="row" style="margin-top:10px"><div class="grow"></div><button class="btn btn-sm btn-soft" data-open="' + esc(x.symbol) + '">Full report →</button></div>' +
+          '</div>';
+
+        const optCards = optR.map(o => {
+          const l = ideaOptLabel(o.sig && o.sig.label);
+          const comps = o.sig && o.sig.components ? Object.keys(o.sig.components).map(k =>
+            '<div class="row" style="margin:4px 0"><span class="muted small grow">' + esc(k) + '</span><div style="width:110px;height:6px;background:var(--surface-3);border-radius:4px;overflow:hidden"><div style="height:100%;width:' + Math.round((o.sig.components[k] || 0) * 100) + '%;background:' + (o.sig.components[k] >= 0.6 ? "var(--ok)" : o.sig.components[k] >= 0.4 ? "var(--warn)" : "var(--err)") + '"></div></div></div>'
+          ).join("") : "";
+          return '<div class="card"><div class="spread"><b>' + esc(o.u) + ' options</b><span class="badge ' + l.cls + '">' + esc(o.sig ? o.sig.label : "—") + '</span></div>' +
+            '<div class="small" style="margin:6px 0;line-height:1.5">' + esc(l.text) + '</div>' +
+            (o.sig ? '<div class="row" style="margin-bottom:6px"><span class="muted small">Chain score ' + (o.sig.score || 0) + '/100</span><span class="badge ' + (o.sig.confidence === "MODERATE" ? "wait" : "sched") + '" style="font-size:11px">data: ' + esc(o.sig.data_quality || "—") + '</span></div>' : "") +
+            comps + '</div>';
+        }).join("");
+
+        body.innerHTML =
+          '<div class="mkt-banner">' +
+            '<div class="row" style="flex-wrap:wrap;gap:12px">' +
+              '<span class="badge ' + (String(brief.regime.regime).toLowerCase().includes("bear") ? "err" : String(brief.regime.regime).toLowerCase().includes("bull") ? "ok" : "wait") + '">' + esc(brief.regime.regime) + '</span>' +
+              '<span class="badge">' + esc(brief.regime.tone) + '</span>' +
+              '<span class="badge">Breadth ' + Math.round((brief.regime.breadth || 0) * 100) + '%</span>' +
+              '<span class="muted small grow text-right">' + esc(brief.data_status) + '</span>' +
+            '</div>' +
+            '<div class="mkt-summary" style="font-size:13px;font-weight:500">' + esc(brief.summary || "") + '</div>' +
+            '<div class="mkt-interp" style="font-size:13px">' + esc(ideaRegimePlain(brief.regime)) + '</div>' +
+          '</div>' +
+          '<div class="dash-grid" style="margin-top:14px">' +
+            mktStat("🟢 Strong setups", buyCount, "of " + board.length + " stocks") +
+            mktStat("🟡 Wait & watch", waitCount, "no clear edge") +
+            mktStat("🔴 Cautious", sellCount, "factors against") +
+            mktStat("Top pick", board.length && board[0].v.cls === "ok" ? board[0].symbol : "—", board.length && board[0].v.cls === "ok" ? "strongest setup" : "none strong") +
+          '</div>' +
+          '<div class="card" style="margin-top:16px"><div class="card-title">How to read this page</div>' +
+            '<div class="small" style="line-height:1.6">' +
+            '<b>🟢 Strong buy case</b> — most factors agree with buying; conviction shows how strongly they agree (not a guarantee).<br>' +
+            '<b>🟡 Wait & watch</b> — factors are split; no edge yet, patience beats forcing a trade.<br>' +
+            '<b>🔴 Cautious</b> — most factors are against holding; consider trimming.<br>' +
+            '<b>Evidence</b> — how much data sits behind the reading (High / Moderate / Low). Every signal is a research aid, not investment advice.</div></div>' +
+          '<div class="grid-cards" style="margin-top:16px">' + board.map((x, i) => ideaCard(x, i === 0)).join("") + '</div>' +
+          '<div class="card" style="margin-top:16px"><div class="card-title">📉 Options mood (derived from the option chain)</div>' +
+            '<div class="grid-2" style="margin-top:10px">' + optCards + '</div></div>';
+
+        $$("#ideaBody [data-open]").forEach(b => b.addEventListener("click", () => navigate("market/stock/" + encodeURIComponent(b.dataset.open))));
+      } catch (e) {
+        body.innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">⚠️</div><h3>Could not load signals</h3><p>' + esc(e && e.message || String(e)) + '</p></div>';
+      }
+    };
+    scan();
+    if (window.__ideaRefresh) clearInterval(window.__ideaRefresh);
+    window.__ideaRefresh = setInterval(() => {
+      if (document.body.contains(content)) scan();
+      else clearInterval(window.__ideaRefresh);
+    }, 60000);
+  }
+
+  /* ---------------- Today Performance ---------------- */
+  function todayPerf(content) {
+    const page = '<div class="page">' +
+      '<div class="page-header"><div><div class="page-title">📅 Today Performance</div>' +
+      '<div class="page-desc">How the AI agent traded today — equity, P&L, cycles, risk guard and the memory engine. Auto-refreshes every 30s.</div></div>' +
+      '<button class="btn btn-soft" id="tpRefresh">↻ Refresh</button></div>' +
+      '<div id="tpBody"><div class="empty" style="display:flex"><div class="empty-ic">📅</div><h3>Loading today…</h3><p>Collecting trades, cycles, risk and memory.</p></div></div>' +
+      '</div>';
+    content.innerHTML = page;
+    const body = $("#tpBody");
+    $("#tpRefresh").addEventListener("click", load);
+
+    function load() {
+      body.innerHTML = '<div class="empty" style="display:flex"><div class="empty-ic">📅</div><h3>Loading today…</h3><p>Collecting trades, cycles, risk and memory.</p></div>';
+      window.MarketClient.tradingPerformanceToday()
+        .then(j => paint((j && j.performance) || null))
+        .catch(e => { body.innerHTML = mktError(e); });
+    }
+
+    function paint(p) {
+      if (!p) { body.innerHTML = mktError(new Error("empty performance response")); return; }
+      const tr = p.trading || {}, pf = p.portfolio || {}, dy = p.day || {}, dl = p.daily_loss || {}, mem = p.memory || {};
+      const run = tr.running === true;
+      const pnl = (dy.day_pnl || 0) >= 0;
+      const memCounts = (mem.stats && mem.stats.counts) || {};
+      const memOut = (mem.stats && mem.stats.outcomes) || {};
+
+      body.innerHTML = `
+        <div class="dash-grid">
+          ${mktStat("Day P&L", (pnl ? "+" : "") + fmtInr(dy.day_pnl), fmtPct(dy.day_return_pct))}
+          ${mktStat("Realized today", fmtInr(dy.realized_today), (dy.sells_today || 0) + " sells · " + (dy.buys_today || 0) + " buys")}
+          ${mktStat("Unrealized", fmtInr(dy.unrealized_today), (pf.open_count || 0) + " open positions")}
+          ${mktStat("Cycles today", tr.cycles_today || 0, "auto-trading")}
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="spread"><div class="card-title">🤖 Auto-trading engine</div>
+            <span class="badge ${run ? "ok" : "wait"}">${run ? "🟢 RUNNING" : "⏸ STOPPED"}</span></div>
+          <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:8px">
+            ${mktStat("Cycles today", tr.cycles_today || 0, (tr.cycles_ok_today || 0) + " ok · " + (tr.cycles_error_today || 0) + " err")}
+            ${mktStat("Interval", tr.interval_sec ? tr.interval_sec + "s" : "—", "agent " + (tr.agent || "—"))}
+            ${mktStat("Mode", tr.mode || "—", tr.live_trading_enabled ? "⚠ live money" : "paper / safe")}
+            ${mktStat("Last cycle", tr.last_cycle_at || "—", "started " + (tr.started_at || "—"))}
+          </div>
+          ${tr.last_error ? '<div class="insight" style="margin-top:10px"><span class="ic">⚠️</span><span>Last error: ' + esc(String(tr.last_error).slice(0, 200)) + '</span></div>' : ""}
+          ${tr.last_result ? '<div class="small muted" style="margin-top:8px;white-space:pre-wrap">Last result: ' + esc(String(tr.last_result).slice(0, 240)) + '</div>' : ""}
+          <div class="row" style="margin-top:12px"><div class="grow"></div>
+            <button class="btn btn-sm btn-soft" id="tpStart" ${run ? "disabled" : ""}>▶ Start</button>
+            <button class="btn btn-sm" id="tpStop" ${run ? "" : "disabled"}>⏹ Stop</button></div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="spread"><div class="card-title">🛡️ Daily loss guard</div>
+            <span class="badge ${dl.tripped ? "err" : "ok"}">${dl.tripped ? "🚨 TRIPPED" : "✅ HEALTHY"}</span></div>
+          <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:8px">
+            ${mktStat("Day loss", fmtInr(dl.daily_loss), "limit " + fmtInr(dl.limit_inr))}
+            ${mktStat("Start equity", fmtInr(dy.start_equity), "now " + fmtInr(dy.equity_now))}
+            ${mktStat("Exposure", (pf.exposure_pct || 0) + "%", "of portfolio")}
+            ${mktStat("Win rate", (pf.win_rate_pct_all || 0) + "%", "all-time paper")}
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="card-title">💼 Open positions</div>
+          <table class="tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Price</th><th>Value</th><th>Unrealized</th><th>Stop</th></tr></thead><tbody>
+          ${(pf.positions || []).map(pos => '<tr><td><b>' + esc(pos.symbol) + '</b></td><td>' + pos.quantity + '</td><td>' + fmtNum(pos.entry, 2) + '</td><td>' + fmtNum(pos.price, 2) + '</td><td>' + fmtInr(pos.value) + '</td><td class="' + (pos.unrealized_pnl >= 0 ? "up" : "down") + '">' + (pos.unrealized_pnl >= 0 ? "+" : "") + fmtInr(pos.unrealized_pnl) + '</td><td>' + fmtNum(pos.stop_loss, 2) + '</td></tr>').join("") || '<tr><td colspan="7" class="muted">No open positions.</td></tr>'}
+          </tbody></table>
+        </div>
+
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">🧾 Trade executions today</div>
+            <table class="tbl"><thead><tr><th>Time</th><th>Action</th><th>Detail</th><th>OK</th></tr></thead><tbody>
+            ${(p.activity || []).map(a => '<tr><td class="muted small">' + esc(a.ts) + '</td><td><span class="badge ' + (a.allowed === false ? "err" : "ok") + '">' + esc(a.action) + '</span></td><td class="small">' + esc(a.detail) + '</td><td>' + (a.allowed === false ? "✗" : "✓") + '</td></tr>').join("") || '<tr><td colspan="4" class="muted">No executions recorded today.</td></tr>'}
+            </tbody></table>
+          </div>
+          <div class="card"><div class="card-title">⏱ Auto-trading events today</div>
+            <table class="tbl"><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>
+            ${(p.cycles || []).slice(0, 12).map(c => '<tr><td class="muted small">' + esc(c.ts) + '</td><td><span class="badge ' + (c.event === "cycle_error" ? "err" : c.event === "cycle" ? "ok" : "wait") + '">' + esc(c.event) + '</span></td><td class="small">' + esc(c.agent || c.reason || c.error || "") + '</td></tr>').join("") || '<tr><td colspan="3" class="muted">No auto-trading events today.</td></tr>'}
+            </tbody></table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="spread"><div class="card-title">🧠 Memory engine</div>
+            <span class="badge sched">dir: ${esc(mem.stats ? mem.stats.dir || "" : "")}</span></div>
+          <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:8px">
+            ${mktStat("Decisions today", mem.today.decisions, (memCounts.decisions || 0) + " stored")}
+            ${mktStat("Outcomes today", mem.today.outcomes, (memCounts.outcomes || 0) + " closed trades")}
+            ${mktStat("Lessons today", mem.today.lessons, (memCounts.lessons || 0) + " stored")}
+            ${mktStat("Win rate", Math.round((memOut.win_rate || 0) * 100) + "%", "expectancy " + fmtInr(memOut.expectancy))}
+          </div>
+          ${(mem.stats && mem.stats.recent_lessons && mem.stats.recent_lessons.length) ? '<div class="small" style="margin-top:10px;line-height:1.6">' +
+            mem.stats.recent_lessons.slice(0, 4).map(l => '<div class="insight" style="margin-top:4px"><span class="ic">📓</span><span><b>' + esc(l.symbol) + '</b> — ' + esc(l.lesson) + '</span></div>').join("") + '</div>' : ""}
+        </div>`;
+
+      $("#tpStart").addEventListener("click", () => {
+        window.MarketClient.tradingStart().then(() => { toast("Auto trading", "Started — each cycle runs through the safety gates.", "ok"); load(); }).catch(e => toast("Start failed", e.message, "err"));
+      });
+      $("#tpStop").addEventListener("click", () => {
+        window.MarketClient.tradingStop().then(() => { toast("Auto trading", "Stopped — no further cycles.", "warn"); load(); }).catch(e => toast("Stop failed", e.message, "err"));
+      });
+    }
+
+    load();
+    if (window.__tpRefresh) clearInterval(window.__tpRefresh);
+    window.__tpRefresh = setInterval(() => {
+      if (document.body.contains(content)) load();
+      else clearInterval(window.__tpRefresh);
+    }, 30000);
+  }
+
   /* ---------------- Market AI ---------------- */
   const MKT_TABS = [
     ["overview", "📊", "Overview"],
@@ -1519,11 +1784,16 @@
           </div>
         </div>
         <div class="grid-3" style="margin-top:16px">
+          ${mktQuick("💡", "Idea Indicator", "All signals explained in plain language", "ideas")}
           ${mktQuick("🎛️", "Screener", "Find stocks by score & sector", "screener")}
           ${mktQuick("📈", "Backtest", "Test the EMA+RSI strategy", "backtest")}
-          ${mktQuick("🧪", "Paper Trading", "Simulate trades safely", "paper")}
         </div>`;
       bindAutoTrading();
+      $$("#mktBody [data-goto]").forEach(c => c.addEventListener("click", () => {
+        const target = c.dataset.goto;
+        if (target === "ideas") navigate("ideas");
+        else navigate("market", target);
+      }));
     });
   }
 

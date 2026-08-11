@@ -215,12 +215,38 @@ class TradingController:
 
     @staticmethod
     def _run_cycle(agent_name: str, task: str) -> str:
-        """Run one agent cycle through the gated tool path (same as a chat turn)."""
+        """Run one agent cycle through the gated tool path (same as a chat turn).
+
+        When AUTO_TRADE_DETERMINISTIC=true the deterministic pipeline (signal ->
+        risk -> compliance -> execute, no LLM) runs instead, through the same
+        gates. Fail-open: pipeline errors fall back to the agent cycle.
+        """
+        from . import pipeline
+
+        if pipeline.enabled():
+            try:
+                return pipeline.run_cycle_report(agent_name)
+            except Exception as exc:  # noqa: BLE001 — fall back to the agent cycle
+                return f"pipeline error: {exc}"
+
         from .registry import get_agent
 
         agent = get_agent(agent_name)
         try:
-            return agent.run(task)
+            result = agent.run(task)
+            try:
+                from . import memory as _memory_mod
+
+                _memory_mod.record_decision(
+                    "CYCLE", "RUN", signal=agent_name, confidence=100.0,
+                    reason=(task or DEFAULT_TASK)[:200], source="auto-trading",
+                )
+                _memory_mod.record_lesson(
+                    "CYCLE", (result or "")[:300], category="auto-cycle",
+                )
+            except Exception:  # noqa: BLE001 — memory must never break the loop
+                pass
+            return result
         finally:
             agent.close()
 

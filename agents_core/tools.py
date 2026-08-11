@@ -694,6 +694,21 @@ def tool_risk_daily_limit() -> str:
     return _as_json(cb.get_guard().status())
 
 
+def tool_memory_context(decision_hint: str = "") -> str:
+    """Trading memory replay: recent outcomes, win rate, per-symbol net, lessons."""
+    from . import memory as mem
+
+    return _as_json(mem.memory_summary(decision_hint=decision_hint))
+
+
+def tool_memory_record_lesson(symbol: str, lesson: str) -> str:
+    """Persist a lesson learned into trading memory (replayed on future cycles)."""
+    from . import memory as mem
+
+    mem.record_lesson(symbol, lesson, category="agent")
+    return _as_json({"status": "ok", "symbol": symbol})
+
+
 def tool_compliance_status() -> str:
     """SEBI algo-framework compliance posture: broker mode, readiness, algo-ID
     tagging, rate limit, audit trail. Read-only."""
@@ -966,6 +981,11 @@ RISK_TOOLS: list[Tool] = [
     Tool("paper_buy", "Execute a simulated paper buy (no real money) at the current quoted price.", tool_paper_buy, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
     Tool("paper_sell", "Execute a simulated paper sell (no real money) at the current quoted price.", tool_paper_sell, {"type": "object", "properties": {"symbol": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["symbol", "quantity"]}),
     Tool("risk_daily_limit", "Daily-loss circuit breaker status (day, equity, loss, limit, tripped). Read-only; when tripped no new positions are allowed today.", tool_risk_daily_limit, {"type": "object", "properties": {}}),
+]
+
+MEMORY_TOOLS: list[Tool] = [
+    Tool("memory_context", "Trading memory replay: recent outcomes, win rate, per-symbol net and replayed lessons. Read BEFORE deciding on a repeat symbol so you learn from past trades.", tool_memory_context, {"type": "object", "properties": {"decision_hint": {"type": "string"}}}),
+    Tool("memory_record_lesson", "Persist a short lesson/observation into trading memory so future cycles can replay it.", tool_memory_record_lesson, {"type": "object", "properties": {"symbol": {"type": "string"}, "lesson": {"type": "string"}}, "required": ["symbol", "lesson"]}),
 ]
 
 BROKER_TOOLS: list[Tool] = [

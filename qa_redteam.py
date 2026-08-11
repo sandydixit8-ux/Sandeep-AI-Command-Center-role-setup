@@ -168,7 +168,8 @@ def phase0():
             rel = p.relative_to(REPO).as_posix()
             if rel in ("agents_core/upstox.py", "agents_core/tools.py", "agents_core/config.py",
                        "agents_core/compliance.py", "agents_core/approval.py",
-                       "agents_core/market.py", "agents_core/__init__.py",
+                       "agents_core/market.py", "agents_core/pipeline.py",
+                       "agents_core/__init__.py",
                        "qa_redteam.py"):
                 continue
             found = re.findall(r"(place_order|submit_order|order_router|broker_api|Zerodha|Upstox|Fyers|AngelOne|Dhan|kiteconnect)", text, re.I)

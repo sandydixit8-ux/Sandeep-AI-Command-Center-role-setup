@@ -43,19 +43,40 @@ class Agent:
         system_prompt: str,
         tools: list[Tool] | None = None,
         max_tokens: int = 2500,
+        with_memory_context: bool = False,
     ) -> None:
         self.name = name
         self.system_prompt = (system_prompt.strip() + GLOBAL_RULES).strip()
         self.tools = tools or build_tools(name)
         self.max_tokens = max_tokens
+        self.with_memory_context = with_memory_context
         self.client = LLMClient()
         self.history: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
 
     # ------------------------------------------------------------------ public
 
+    def _inject_memory_context(self) -> None:
+        """Prepend a fresh trading-memory replay to the reasoning context.
+
+        The day-by-day feedback loop: before the agent reasons, it sees recent
+        outcomes, win rate, expectancy, per-symbol net and replayed lessons.
+        Fail-open and idempotent (never inserts twice, never raises).
+        """
+        if not self.with_memory_context:
+            return
+        try:
+            from . import memory as _m
+
+            ctx = _m.memory_summary().get("context", "")
+            if ctx and not any(m.get("content") == ctx for m in self.history):
+                self.history.insert(1, {"role": "system", "content": ctx})
+        except Exception:  # noqa: BLE001 — memory must never break a run
+            pass
+
     def run(self, task: str) -> str:
         """Run one task (fresh user turn). Returns the final assistant text."""
         self.history.append({"role": "user", "content": task})
+        self._inject_memory_context()
         result = ""
         for event in self._iterate():
             if event["type"] == "result":
@@ -78,6 +99,7 @@ class Agent:
           {"type": "error", "text": ...}       on failure / step cap
         """
         self.history.append({"role": "user", "content": task})
+        self._inject_memory_context()
         yield from self._iterate()
 
     # ------------------------------------------------------------------ internals

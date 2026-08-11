@@ -1326,6 +1326,37 @@ def _paper_gate(s: dict[str, Any]) -> None:
         raise ValueError(f"paper trade refused (fail-closed): {why}")
 
 
+def _mem() -> Any:
+    from . import memory as _memory_mod
+    return _memory_mod
+
+
+def _mem_record_entry(symbol: str, price: float, quantity: int) -> None:
+    """Record a paper entry to the trading memory (fail-open)."""
+    try:
+        _mem().record_decision(symbol, "PAPER BUY", signal="entry", confidence=100.0,
+                               reason=f"paper buy x{quantity} @ {price:.2f}", source="paper")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _mem_record_exit(symbol: str, price: float, quantity: int, pnl: float, entry: float) -> None:
+    """Record a closed paper trade (outcome + lesson) to trading memory (fail-open)."""
+    try:
+        holding = 0.0
+        _mem().record_outcome(symbol, pnl, pnl_pct=pnl / (entry * quantity) * 100 if entry * quantity else 0.0,
+                              holding_hours=holding, exit_reason="paper_sell")
+        if pnl < 0:
+            _mem().record_lesson(
+                symbol,
+                f"paper loss ₹{pnl:,.0f} exiting x{quantity} at {price:.2f} vs entry {entry:.2f} — "
+                "review stop before re-entry.",
+                category="paper-exit",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target: float | None = None) -> dict[str, Any]:
     safety_gate("paper_stock", f"BUY {symbol} x {quantity}")
     cb.check_open(f"paper buy {symbol} x {quantity}")
@@ -1347,6 +1378,7 @@ def paper_buy(symbol: str, quantity: int, stop_loss: float | None = None, target
     st["trades"].append({"type": "BUY", "symbol": s["symbol"], "quantity": quantity,
                          "price": price, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pnl": 0})
     _save_paper(st)
+    _mem_record_entry(s["symbol"], price, quantity)
     return {"status": "PAPER TRADE executed (simulated, no real money)", "symbol": s["symbol"],
             "quantity": quantity, "price": price, "cash": round(st["cash"], 2)}
 
@@ -1371,6 +1403,7 @@ def paper_sell(symbol: str, quantity: int) -> dict[str, Any]:
                          "price": price, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "pnl": round(pnl, 2)})
     _save_paper(st)
     cb.record_trade(round(pnl, 2))
+    _mem_record_exit(s["symbol"], price, quantity, round(pnl, 2), pos["entry"])
     return {"status": "PAPER TRADE executed (simulated, no real money)", "symbol": s["symbol"],
             "quantity": quantity, "price": price, "pnl": round(pnl, 2), "cash": round(st["cash"], 2)}
 

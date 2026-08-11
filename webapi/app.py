@@ -563,3 +563,10 @@ def trading_stop() -> dict:
     from agents_core import trading
 
     return {"status": "ok", "trading": trading.stop(reason="ui")}
+
+
+@app.get("/api/v1/trading/performance/today")
+def trading_performance_today() -> dict:
+    from agents_core import performance
+
+    return {"status": "ok", "performance": performance.today_performance()}

@@ -11,6 +11,7 @@ from .tools import (
     GMAIL_TOOLS,
     JOBSEARCH_TOOLS,
     MARKET_TOOLS,
+    MEMORY_TOOLS,
     OPTION_TOOLS,
     RAG_TOOLS,
     RISK_TOOLS,
@@ -23,8 +24,8 @@ _EXTRA_TOOLS = {
     "jobsearch": JOBSEARCH_TOOLS,
     "exec": GMAIL_TOOLS,
     "bd": GMAIL_TOOLS,
-    "market": MARKET_TOOLS + OPTION_TOOLS + RAG_TOOLS + APPROVAL_TOOLS,
-    "risk": RISK_TOOLS + BROKER_TOOLS + RAG_TOOLS + COMPLIANCE_TOOLS + APPROVAL_TOOLS,
+    "market": MARKET_TOOLS + OPTION_TOOLS + RAG_TOOLS + APPROVAL_TOOLS + MEMORY_TOOLS,
+    "risk": RISK_TOOLS + BROKER_TOOLS + RAG_TOOLS + COMPLIANCE_TOOLS + APPROVAL_TOOLS + MEMORY_TOOLS,
 }
 
 
@@ -34,7 +35,8 @@ def get_agent(name: str) -> Agent:
         raise KeyError(f"unknown agent {name!r}. Available: {', '.join(AGENTS)}")
     label, system_prompt = AGENTS[name]
     tools = build_tools(name, _EXTRA_TOOLS.get(name))
-    agent = Agent(name=name, system_prompt=system_prompt, tools=tools)
+    agent = Agent(name=name, system_prompt=system_prompt, tools=tools,
+                  with_memory_context=name in ("market", "risk"))
     agent.label = label  # type: ignore[attr-defined]
     return agent
 
