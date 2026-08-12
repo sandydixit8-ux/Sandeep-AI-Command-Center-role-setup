@@ -20,8 +20,9 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re as _re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext as _nullcontext
 from functools import wraps
 from pathlib import Path
 from threading import Lock
@@ -143,6 +144,66 @@ async def rate_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# --------------------------------------------------------------------------- conversations
+# Optional multi-turn sessions: pass `session_id` in /api/v1/run (and /run/stream)
+# to keep one agent instance alive across calls so history/memory persist.
+# Sessions are in-memory and per-process (single uvicorn worker), matching the
+# rate-limiter/TTL caches/trading loop. Without session_id, behavior is the same
+# stateless fresh-agent-per-request as before.
+
+
+class _Session:
+    __slots__ = ("agent", "created", "last_used", "lock")
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.created = time.time()
+        self.last_used = time.time()
+        self.lock = Lock()
+
+
+_SESSION_TTL = float(os.environ.get("AGENT_SESSION_TTL_MIN", "30") or 30) * 60.0
+_session_lock = Lock()
+_sessions: dict[str, _Session] = {}
+
+
+def _evict_sessions():
+    if not _sessions:
+        return
+    now = time.time()
+    stale = [k for k, s in _sessions.items() if now - s.last_used > _SESSION_TTL]
+    for k in stale:
+        sess = _sessions.pop(k, None)
+        if sess is not None:
+            try:
+                sess.agent.close()
+            except Exception:
+                pass
+
+
+def _resolve_session(session_id: str, agent_name: str):
+    """Return the (possibly new) agent for a session. Holds no lock on return."""
+    with _session_lock:
+        _evict_sessions()
+        sess = _sessions.get(session_id)
+        if sess is None or sess.agent.name != agent_name:
+            if sess is not None:
+                _sessions.pop(session_id, None)
+                try:
+                    sess.agent.close()
+                except Exception:
+                    pass
+            sess = _Session(get_agent(agent_name))
+            _sessions[session_id] = sess
+        else:
+            sess.last_used = time.time()
+        return sess
+
+
+def _history_turns(agent) -> int:
+    return sum(1 for e in getattr(agent, "history", []) if e.get("role") == "user")
+
+
 def _ttl_cache(ttl: float):
     """Small in-memory TTL cache for CPU-heavy read endpoints (signal/screener)."""
     store: dict[str, tuple[float, object]] = {}
@@ -170,12 +231,22 @@ def _ttl_cache(ttl: float):
 class RunRequest(BaseModel):
     agent: str
     task: str = Field(min_length=1)
+    session_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("task")
     @classmethod
     def _task_not_blank(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("task must not be blank")
+        return v
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_id_safe(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not _re.fullmatch(r"[A-Za-z0-9_.\-]+", v):
+            raise ValueError("session_id may only contain letters, digits, '_', '.', '-'")
         return v
 
 
@@ -219,13 +290,17 @@ def _get_agent_or_404(name: str):
 
 @app.post("/api/v1/run", response_model=RunResponse)
 def run(req: RunRequest) -> RunResponse:
-    agent = _get_agent_or_404(req.agent)
+    _get_agent_or_404(req.agent)
+    sess = _resolve_session(req.session_id, req.agent) if req.session_id else None
+    agent = sess.agent if sess else get_agent(req.agent)
     label = getattr(agent, "label", req.agent)
     events: list[dict] = []
     try:
-        events = list(agent.run_stream(req.task))
+        with sess.lock if sess else _nullcontext():
+            events = list(agent.run_stream(req.task))
     finally:
-        agent.close()
+        if sess is None:
+            agent.close()
     for event in events:
         if event["type"] == "error":
             raise _llm_http_error(event["text"])
@@ -239,15 +314,76 @@ def run_stream(req: RunRequest) -> StreamingResponse:
     _get_agent_or_404(req.agent)  # validate before streaming starts
 
     def gen():
-        agent = get_agent(req.agent)
+        sess = _resolve_session(req.session_id, req.agent) if req.session_id else None
+        agent = sess.agent if sess else get_agent(req.agent)
         try:
-            yield f"data: {json.dumps({'type': 'meta', 'agent': req.agent, 'label': label})}\n\n"
-            for event in agent.run_stream(req.task):
-                yield f"data: {json.dumps(event, default=str)}\n\n"
+            yield f"data: {json.dumps({'type': 'meta', 'agent': req.agent, 'label': label, 'session_id': req.session_id})}\n\n"
+            with sess.lock if sess else _nullcontext():
+                for event in agent.run_stream(req.task):
+                    yield f"data: {json.dumps(event, default=str)}\n\n"
         finally:
-            agent.close()
+            if sess is None:
+                agent.close()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/v1/conversations")
+def conversations() -> list[dict]:
+    with _session_lock:
+        _evict_sessions()
+        return [
+            {
+                "session_id": sid,
+                "agent": s.agent.name,
+                "label": getattr(s.agent, "label", s.agent.name),
+                "turns": _history_turns(s.agent),
+                "created": s.created,
+                "last_used": s.last_used,
+            }
+            for sid, s in sorted(_sessions.items(), key=lambda kv: kv[1].last_used, reverse=True)
+        ]
+
+
+@app.get("/api/v1/conversations/{session_id}")
+def conversation_detail(session_id: str) -> dict:
+    if not _re.fullmatch(r"[A-Za-z0-9_.\-]+", session_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    with _session_lock:
+        _evict_sessions()
+        sess = _sessions.get(session_id)
+        if sess is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        history = [
+            {"role": e.get("role"), "content": e.get("content", "")}
+            for e in getattr(sess.agent, "history", [])
+            if e.get("role") in ("user", "assistant")
+        ]
+        return {
+            "session_id": session_id,
+            "agent": sess.agent.name,
+            "label": getattr(sess.agent, "label", sess.agent.name),
+            "created": sess.created,
+            "last_used": sess.last_used,
+            "turns": _history_turns(sess.agent),
+            "history": history,
+        }
+
+
+@app.delete("/api/v1/conversations/{session_id}")
+def conversation_delete(session_id: str) -> dict:
+    if not _re.fullmatch(r"[A-Za-z0-9_.\-]+", session_id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    with _session_lock:
+        _evict_sessions()
+        sess = _sessions.pop(session_id, None)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    try:
+        sess.agent.close()
+    except Exception:
+        pass
+    return {"status": "closed", "session_id": session_id}
 
 
 # --------------------------------------------------------------------------- market intelligence
