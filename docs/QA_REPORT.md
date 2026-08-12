@@ -36,28 +36,33 @@
 
 | # | Sev | Finding |
 |---|-----|---------|
-| F1 | P2 | CPU-heavy endpoints degrade under concurrency (signal p99 15.2s @100 concurrent; single uvicorn worker, no cache) |
-| F2 | P3 | No security headers (CSP/HSTS/X-Frame-Options/X-Content-Type-Options); `Server: uvicorn` leaks |
-| F3 | P3 | No API rate limiting; no session/conversation persistence across `/run` calls |
-| F4 | P3 | Execution audit records sparse (symbol/quantity/outcome null) — weak SEBI-style evidence |
-| F5 | P3 | Breaker dual-gate: `check_open` (dynamic) vs `is_tripped` (sticky) can diverge |
 | F6 | P3 | Groq free-tier 8k TPM still limits multi-step runs; consider tier upgrade or Anthropic for richer contexts |
 | F7 | P3 | UI a11y debt (no `<form>` semantics) but good aria-label coverage |
+| F8 | P3 | Conversation persistence across `/run` calls (session memory) is a feature, not yet built |
+
+### Remediated this cycle (F1–F5)
+
+| # | Sev | Finding | Fix |
+|---|-----|---------|-----|
+| F1 | P2 | CPU-heavy endpoints degrade under concurrency (signal p99 15.2s @100 concurrent) | **FIXED**: TTL cache (10s) on `/market/signal` + `/market/screener` — verified cold 4.1s → cached 6ms |
+| F2 | P3 | No security headers; `Server: uvicorn` leaks | **FIXED**: CSP/HSTS/X-Frame-Options/X-Content-Type-Options/Referrer-Policy/Permissions-Policy middleware; `Cache-Control: no-store` on API; server launched with `--no-server-header` |
+| F3 | P3 | No API rate limiting | **FIXED**: in-memory fixed-window limiter per client (`AGENT_RATE_LIMIT_RPM`, default 600) → 429 + Retry-After (verified live) |
+| F4 | P3 | Execution audit records sparse | **FIXED**: audit now includes structured `side/symbol/quantity` (parsed from detail) + `blocked_by` |
+| F5 | P3 | Breaker dual-gate divergence | **FIXED**: `check_open` now blocks immediately when tripped for the day (matches `is_tripped()`), reducing orders still allowed |
 
 ## 5. Scores
 
 - Functional completeness: **96%** (105/105 probe checks after harness correction)
-- Security: **78%** (auth correct; headers/rate-limiting missing)
-- Resilience/Risk: **88%** (breakers, kill switch, fail-closed verified)
+- Security: **90%** (auth + security headers + rate limiting; conversation/SSO still local)
+- Resilience/Risk: **92%** (breakers, kill switch, fail-closed, audit enrichment verified)
 - AI quality: **70%** (market agent executes end-to-end on Groq; error surfacing fixed)
-- **Production readiness: ~82/100 → CONDITIONAL GO**
+- **Production readiness: ~87/100 → CONDITIONAL GO**
 
 ## 6. Conditions for GO (live trading)
 
-1. F2: security headers + remove `Server` header.
-2. F3: rate limiting + conversation persistence.
-3. F4: enrich execution audit records.
-4. Re-verify broker fail-closed paths on a live (non-sandbox) Upstox account with `LIVE_TRADING_ENABLED=true`.
+1. Conversation/session persistence for multi-turn agent runs (F8).
+2. Re-verify broker fail-closed paths on a live (non-sandbox) Upstox account with `LIVE_TRADING_ENABLED=true`.
+3. Optional: raise provider rate tier (F6).
 
 ## 7. QA harness
 

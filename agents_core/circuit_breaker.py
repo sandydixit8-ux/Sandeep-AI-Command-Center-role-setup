@@ -170,6 +170,13 @@ class DailyLossGuard:
         if self._provider is None:
             return
         st = self._load()
+        if st.get("tripped"):
+            # Once tripped for the day, stay closed until the day boundary — the
+            # provider snapshot cannot reopen the market (matches is_tripped()).
+            raise ExecutionBlockedError(
+                "daily-loss breaker is already tripped today; no new positions. "
+                "Risk-reducing (close) orders are still allowed."
+            )
         try:
             snap = self._provider()
             equity = float(snap.get("equity"))

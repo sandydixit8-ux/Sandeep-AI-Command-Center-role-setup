@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,7 @@ def kill_switch_active() -> tuple[bool, str]:
     return False, "no kill switch"
 
 
-def _audit_record(action: str, detail: str, allowed: bool) -> None:
+def _audit_record(action: str, detail: str, allowed: bool, blocked_by: str | None = None) -> None:
     f = DATA_DIR / "execution_audit.jsonl"
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,9 @@ def _audit_record(action: str, detail: str, allowed: bool) -> None:
             "ts": datetime.now().isoformat(timespec="seconds"),
             "action": action,
             "detail": detail,
+            **(_parse_detail(detail) or {}),
             "allowed": allowed,
+            "blocked_by": blocked_by,
             "live_trading_enabled": live_trading_enabled(),
             "prev_hash": prev_hash,
         }
@@ -81,6 +84,17 @@ def _audit_record(action: str, detail: str, allowed: bool) -> None:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001 — audit must never break the caller
         pass
+
+
+_TRADE_DETAIL = re.compile(r"^(BUY|SELL)\s+([A-Z]+)\s+x\s+(\d+)\s*$", re.IGNORECASE)
+
+
+def _parse_detail(detail: str) -> dict[str, Any]:
+    """Best-effort structured extraction from a gate detail like 'BUY TCS x 1'."""
+    m = _TRADE_DETAIL.match((detail or "").strip())
+    if not m:
+        return {}
+    return {"side": m.group(1).upper(), "symbol": m.group(2).upper(), "quantity": int(m.group(3))}
 
 
 def safety_gate(action: str, detail: str = "") -> None:
@@ -93,12 +107,12 @@ def safety_gate(action: str, detail: str = "") -> None:
     killed, why = kill_switch_active()
 
     if killed:
-        _audit_record(action, f"{detail} blocked: {why}".strip(), allowed=False)
+        _audit_record(action, f"{detail} blocked: {why}".strip(), allowed=False, blocked_by="kill_switch")
         raise ExecutionBlockedError(
             f"execution blocked by kill switch ({why}). No trade executed."
         )
     if is_live and not live_trading_enabled():
-        _audit_record(action, f"{detail} blocked: LIVE_TRADING_ENABLED not true".strip(), allowed=False)
+        _audit_record(action, f"{detail} blocked: LIVE_TRADING_ENABLED not true".strip(), allowed=False, blocked_by="live_disabled")
         raise ExecutionBlockedError(
             "live orders are disabled (LIVE_TRADING_ENABLED is not 'true'). "
             "This system is paper-only; no real-money order was sent."

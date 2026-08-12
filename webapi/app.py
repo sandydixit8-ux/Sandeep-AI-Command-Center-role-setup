@@ -20,8 +20,11 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import time
 from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -73,6 +76,95 @@ async def api_auth_middleware(request: Request, call_next):
         if not provided or not hmac.compare_digest(provided, token):
             return JSONResponse(status_code=401, content={"detail": "missing or invalid API key"})
     return await call_next(request)
+
+
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "geolocation=(), camera=(), microphone=(), payment=()",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+}
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers[name] = value
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+class _RateLimiter:
+    """Fixed 60s window, per-client. Settable via AGENT_RATE_LIMIT_RPM (0 disables)."""
+
+    def __init__(self, rpm: int) -> None:
+        self.rpm = max(rpm, 1)
+        self._windows: dict[str, tuple[float, int]] = {}
+        self._lock = Lock()
+
+    def allow(self, key: str) -> tuple[bool, int]:
+        now = time.time()
+        with self._lock:
+            start, count = self._windows.get(key, (now, 0))
+            if now - start >= 60.0:
+                start, count = now, 0
+            count += 1
+            self._windows[key] = (start, count)
+            if len(self._windows) > 10_000:
+                self._windows = {k: v for k, v in self._windows.items() if now - v[0] < 120.0}
+            if count > self.rpm:
+                return False, int(60.0 - (now - start)) + 1
+            return True, 0
+
+
+_RATE_LIMIT_RPM = int(os.environ.get("AGENT_RATE_LIMIT_RPM", "600") or 600)
+_RATE_LIMITER = _RateLimiter(_RATE_LIMIT_RPM)
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if _RATE_LIMIT_RPM > 0 and request.url.path.startswith("/api/"):
+        client = request.client.host if request.client else "unknown"
+        allowed, retry_after = _RATE_LIMITER.allow(client)
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "rate limit exceeded, slow down"},
+                headers={"Retry-After": str(retry_after)},
+            )
+    return await call_next(request)
+
+
+def _ttl_cache(ttl: float):
+    """Small in-memory TTL cache for CPU-heavy read endpoints (signal/screener)."""
+    store: dict[str, tuple[float, object]] = {}
+    lock = Lock()
+
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = json.dumps([args, kwargs], default=str)
+            now = time.time()
+            with lock:
+                hit = store.get(key)
+                if hit is not None and now - hit[0] < ttl:
+                    return hit[1]
+            result = fn(*args, **kwargs)
+            with lock:
+                store[key] = (now, result)
+            return result
+
+        return wrapper
+
+    return deco
 
 
 class RunRequest(BaseModel):
@@ -236,12 +328,14 @@ def market_score(symbol: str) -> dict:
 
 
 @app.get("/api/v1/market/signal/{symbol}")
+@_ttl_cache(ttl=10.0)
 def market_signal(symbol: str) -> dict:
     _stock_or_404(symbol)
     return market.signal_engine(symbol)
 
 
 @app.get("/api/v1/market/screener")
+@_ttl_cache(ttl=10.0)
 def market_screener(min_score: float | None = None, sector: str | None = None,
                     max_pe: float | None = None, min_momentum: float | None = None,
                     min_market_cap: float | None = None) -> list[dict]:
