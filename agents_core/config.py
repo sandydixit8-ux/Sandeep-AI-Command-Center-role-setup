@@ -41,6 +41,11 @@ class Settings:
         self.sheet_range = _env("AGENT_SHEET_RANGE", "A1:E1000")
         self.timeout = float(_env("AGENT_TIMEOUT", "90") or 90)
         self.max_tool_steps = int(_env("AGENT_MAX_TOOL_STEPS", "10") or 10)
+        # Per-request token budget: the tool schemas + history + max_tokens are
+        # pre-flighted against this so a single request never exceeds the
+        # provider's request/TPM cap (e.g. Groq's 8k). 0 disables the check.
+        self.llm_request_budget = int(_env("AGENT_LLM_REQUEST_BUDGET", "7000") or 0)
+        self.llm_min_max_tokens = int(_env("AGENT_LLM_MIN_MAX_TOKENS", "600") or 600)
 
     def has_provider_key(self) -> bool:
         if self.provider == "anthropic":

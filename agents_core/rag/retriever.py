@@ -110,12 +110,15 @@ class RagIndex:
     def query(self, question: str, top_k: int = 5,
               section: str | None = None,
               hybrid: bool = True,
-              bm25_weight: float = 0.6) -> list[dict[str, Any]]:
+              bm25_weight: float = 0.6,
+              min_score: float = 0.0) -> list[dict[str, Any]]:
         """Return top-k chunks ranked by hybrid (BM25 + embedding) relevance.
 
         ``section`` filters chunks by their metadata section (corpus subdir).
         ``hybrid=False`` reverts to pure BM25. ``bm25_weight`` blends the two
-        scores (0.6 BM25 + 0.4 embedding cosine by default).
+        scores (0.6 BM25 + 0.4 embedding cosine by default). Results are sorted
+        by their reported hybrid ``score`` descending; chunks scoring below
+        ``min_score`` are dropped.
         """
         self._load()
         if not self.total_chunks:
@@ -142,19 +145,28 @@ class RagIndex:
 
         # Re-rank: keep the top pool, re-score by pure query-chunk embedding
         # similarity so ordering reflects semantic closeness, not just length.
-        results = []
         pool = scored[: max(top_k * 3, top_k)]
         pool.sort(key=lambda x: cosine(q_vec, embed(x[2], idf)), reverse=True)
-        for s, d, chunk, sec in pool[:top_k]:
+        results = []
+        for _s, d, chunk, sec in pool[:top_k]:
+            b = bm25(chunk, q_terms, self.df, self.total_chunks, self.avg_chunk_len)
+            sim = cosine(q_vec, embed(chunk, idf))
+            if hybrid:
+                s = bm25_weight * b + (1 - bm25_weight) * sim
+            else:
+                s = b
+            if s < min_score:
+                continue
             results.append({
                 "source": d.title,
                 "path": d.path,
                 "section": sec,
                 "score": round(s, 4),
-                "bm25": round(bm25(chunk, q_terms, self.df, self.total_chunks, self.avg_chunk_len), 4),
-                "sim": round(cosine(q_vec, embed(chunk, idf)), 4),
+                "bm25": round(b, 4),
+                "sim": round(sim, 4),
                 "text": chunk,
             })
+        results.sort(key=lambda x: x["score"], reverse=True)
         return results
 
     # ------------------------------------------------------------------ drift

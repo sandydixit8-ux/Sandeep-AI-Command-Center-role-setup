@@ -26,7 +26,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agents_core.registry import get_agent
 from agents_core.prompts import AGENTS
@@ -79,11 +79,28 @@ class RunRequest(BaseModel):
     agent: str
     task: str = Field(min_length=1)
 
+    @field_validator("task")
+    @classmethod
+    def _task_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("task must not be blank")
+        return v
+
 
 class RunResponse(BaseModel):
     agent: str
     label: str
     response: str
+
+
+def _llm_http_error(text: str) -> HTTPException:
+    """Map an agent error string to a meaningful HTTP status instead of 200."""
+    lowered = text.lower()
+    if " 429 " in f" {lowered} " or lowered.startswith("error: openai error 429"):
+        return HTTPException(status_code=429, detail=text)
+    if "413" in lowered:
+        return HTTPException(status_code=413, detail=text)
+    return HTTPException(status_code=502, detail=text)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -112,10 +129,15 @@ def _get_agent_or_404(name: str):
 def run(req: RunRequest) -> RunResponse:
     agent = _get_agent_or_404(req.agent)
     label = getattr(agent, "label", req.agent)
+    events: list[dict] = []
     try:
-        response = agent.run(req.task)
+        events = list(agent.run_stream(req.task))
     finally:
         agent.close()
+    for event in events:
+        if event["type"] == "error":
+            raise _llm_http_error(event["text"])
+    response = next((e["text"] for e in reversed(events) if e["type"] == "result"), "(no response)")
     return RunResponse(agent=req.agent, label=label, response=response)
 
 
@@ -299,8 +321,11 @@ def _valid_underlying(underlying: str) -> str:
 
 
 def _analyze(underlying: str, expiry: str | None) -> dict:
+    u = _valid_underlying(underlying)
     try:
-        return options_mod.analyze_chain(_valid_underlying(underlying), expiry)
+        return options_mod.analyze_chain(u, expiry)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"option-chain fetch failed: {exc}") from exc
 
@@ -312,8 +337,13 @@ def options_analysis(underlying: str = "NIFTY", expiry: str | None = None) -> di
 
 @app.get("/api/v1/options/expiries")
 def options_expiries(underlying: str = "NIFTY") -> list[str]:
-    snap = options_mod.OptionChainDataService().fetch(_valid_underlying(underlying), store=False)
-    return snap.expiries
+    try:
+        snap = options_mod.OptionChainDataService().fetch(_valid_underlying(underlying), store=False)
+        return snap.expiries
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"option-chain fetch failed: {exc}") from exc
 
 
 @app.get("/api/v1/options/metrics")
