@@ -125,8 +125,10 @@ class TradingController:
             )
         with self._lock:
             st = self._load()
-            if st.get("status") == "RUNNING":
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            if st.get("status") == "RUNNING" and thread_alive:
                 return self.status()
+            # stale RUNNING state (e.g. the previous process died) -> start fresh
             self._stop_event = threading.Event()
             st["status"] = "RUNNING"
             st["started_at"] = datetime.now().isoformat(timespec="seconds")

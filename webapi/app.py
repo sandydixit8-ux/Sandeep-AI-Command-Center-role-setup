@@ -20,6 +20,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -35,7 +36,22 @@ from agents_core import options_intel as intel_mod
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="Sandeep AI Command Center", version="0.5.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Resume the auto-trading loop after a process restart if it was RUNNING,
+    # so the state file never claims RUNNING while no loop thread is alive.
+    try:
+        from agents_core import trading
+
+        if trading.status().get("running"):
+            trading.start()
+    except Exception:  # noqa: BLE001 — never block app startup
+        pass
+    yield
+
+
+app = FastAPI(title="Sandeep AI Command Center", version="0.5.0",
+              lifespan=_lifespan)
 
 
 def _api_token() -> str:
