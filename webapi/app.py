@@ -846,3 +846,10 @@ def trading_performance_today() -> dict:
     from agents_core import performance
 
     return {"status": "ok", "performance": performance.today_performance()}
+
+
+@app.get("/api/v1/trading/executions")
+def trading_executions(date: str | None = None) -> dict:
+    from agents_core import performance
+
+    return {"status": "ok", **performance.executions_by_date(date)}

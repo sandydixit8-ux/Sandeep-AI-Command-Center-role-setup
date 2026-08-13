@@ -191,4 +191,59 @@ def today_performance() -> dict[str, Any]:
     }
 
 
-__all__ = ["today_performance"]
+def executions_by_date(date: str | None = None) -> dict[str, Any]:
+    """Execution, cycle and option-paper history filtered by date (YYYY-MM-DD).
+
+    Read-only and fail-open: missing/corrupt sources degrade to empty lists.
+    Returns the list of dates that have any activity so the UI can build a picker.
+    """
+    def _day(ts: Any) -> str:
+        if not isinstance(ts, str):
+            return ""
+        return ts.split("T")[0][:10]
+
+    execs = _read_jsonl(DATA_DIR / "execution_audit.jsonl")
+    cycles = _read_jsonl(DATA_DIR / "auto_trading_audit.jsonl")
+    opts = _read_json(DATA_DIR / "options_paper_positions.json")
+    opts = opts if isinstance(opts, list) else []
+
+    available = sorted({
+        _day(e.get("ts")) for e in execs
+    } | {
+        _day(e.get("ts")) for e in cycles
+    } | {
+        _day(o.get("entered_at")) for o in opts
+    } | {
+        _day(o.get("exited_at")) for o in opts
+    } - {""}, reverse=True)
+
+    if date:
+        execs = [e for e in execs if _day(e.get("ts")) == date]
+        cycles = [e for e in cycles if _day(e.get("ts")) == date]
+        opts = [o for o in opts if _day(o.get("entered_at")) == date or _day(o.get("exited_at")) == date]
+
+    execs.sort(key=lambda e: str(e.get("ts", "")), reverse=True)
+    cycles.sort(key=lambda e: str(e.get("ts", "")), reverse=True)
+
+    def _is_buy(e: dict[str, Any]) -> bool:
+        return e.get("side") == "BUY" or str(e.get("action", "")).lower().startswith("buy")
+
+    def _is_sell(e: dict[str, Any]) -> bool:
+        return e.get("side") == "SELL" or str(e.get("action", "")).lower().startswith("sell")
+
+    return {
+        "date": date or "all",
+        "available_dates": available,
+        "executions": execs,
+        "cycles": cycles,
+        "options": opts,
+        "summary": {
+            "total": len(execs),
+            "buys": sum(1 for e in execs if _is_buy(e)),
+            "sells": sum(1 for e in execs if _is_sell(e)),
+            "blocked": sum(1 for e in execs if e.get("allowed") is False),
+        },
+    }
+
+
+__all__ = ["today_performance", "executions_by_date"]

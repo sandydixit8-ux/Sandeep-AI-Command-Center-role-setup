@@ -3356,6 +3356,19 @@
           </tbody></table></div>
         </div>
 
+        <div class="card" style="margin-top:16px">
+          <div class="spread" style="align-items:center">
+            <div><div class="card-title">📅 Trade history — pick a date</div>
+              <div class="muted small">See exactly which trades executed on any date.</div></div>
+            <div class="row" style="gap:8px;align-items:center">
+              <input type="date" id="monDate" aria-label="Execution date">
+              <button class="btn btn-sm btn-primary" id="monDateGo">Show</button>
+            </div>
+          </div>
+          <div id="monDates" class="muted small" style="margin-top:8px"></div>
+          <div id="monDateBody" class="muted small" style="margin-top:8px">Loading dates…</div>
+        </div>
+
         <div class="card" style="margin-top:16px"><div class="card-title">Data provider</div>
           <div class="row small" style="gap:12px;flex-wrap:wrap"><span class="badge ok">● ${esc(s.provider)}</span><span class="badge wait">${esc(s.data)}</span><span class="badge">${esc(s.mode)}</span></div>
           <div class="muted small" style="margin-top:8px">Updated: ${esc(s.updated)}</div>
@@ -3375,6 +3388,56 @@
         </div>`;
         const rb = document.getElementById("monRefresh");
         if (rb) rb.addEventListener("click", load);
+        const loadDate = (d) => {
+          const box = document.getElementById("monDateBody");
+          if (!box) return;
+          box.innerHTML = 'Loading…';
+          window.MarketClient.tradingExecutions(d).then(r => {
+            const ex = (r && r.executions) || [], cy = (r && r.cycles) || [], op = (r && r.options) || [], s = (r && r.summary) || {};
+            const exRows = ex.length
+              ? ex.map(a => {
+                  const detail = a.symbol ? a.symbol + " x " + a.quantity : (a.detail || "");
+                  const blocked = a.allowed === false;
+                  return '<tr><td class="muted small">' + esc(a.ts) + '</td><td><span class="badge ' + (blocked ? "err" : "ok") + '">' + esc(a.action || "") + '</span></td><td class="small">' + esc(detail) + '</td><td>' + (blocked ? '<span class="err small">✗ ' + esc(a.blocked_by || "blocked") + '</span>' : '<span class="ok small">✓ executed</span>') + '</td></tr>';
+                }).join("")
+              : '<tr><td colspan="4" class="muted">No executions on this date.</td></tr>';
+            const cyRows = cy.length
+              ? cy.slice(0, 20).map(c => '<tr><td class="muted small">' + esc(c.ts) + '</td><td><span class="badge ' + (c.event === "cycle_error" ? "err" : c.event === "cycle" ? "ok" : "wait") + '">' + esc(c.event) + '</span></td><td class="small">' + esc(c.agent || c.reason || c.error || "") + '</td></tr>').join("")
+              : '<tr><td colspan="3" class="muted">No auto-trading events on this date.</td></tr>';
+            const opRows = op.length
+              ? op.map(o => '<tr><td class="muted small">' + esc(o.exited_at || o.entered_at || "") + '</td><td>' + esc(o.symbol || o.underlying || "") + '</td><td>' + esc(o.option_type || "") + '</td><td>' + esc(o.quantity || 0) + '</td><td>' + esc(o.strike_price ?? o.strike ?? "") + '</td><td><span class="badge ' + (o.status === "OPEN" ? "ok" : "wait") + '">' + esc(o.status || "") + '</span></td></tr>').join("")
+              : '';
+            box.innerHTML = `
+              <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:4px">
+                <span class="badge">${s.total || 0} executions</span>
+                <span class="badge ok">${s.buys || 0} buys</span>
+                <span class="badge err">${s.sells || 0} sells</span>
+                <span class="badge wait">${s.blocked || 0} blocked</span>
+              </div>
+              <div class="table-wrap" style="margin-top:8px"><table class="tbl"><thead><tr><th>Time</th><th>Action</th><th>Detail</th><th>Status</th></tr></thead><tbody>${exRows}</tbody></table></div>
+              <div class="grid-2" style="margin-top:12px">
+                <div class="card"><div class="card-title">⏱ Auto-trading events</div>
+                  <div class="table-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>${cyRows}</tbody></table></div>
+                </div>
+                ${op.length ? '<div class="card"><div class="card-title">🧾 Option paper trades</div><div class="table-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Symbol</th><th>Type</th><th>Qty</th><th>Strike</th><th>Status</th></tr></thead><tbody>' + opRows + '</tbody></table></div></div>' : ""}
+              </div>`;
+          }).catch(e => { box.innerHTML = '<span class="err small">' + esc((e && e.message) || String(e)) + '</span>'; });
+        };
+        const dp = document.getElementById("monDate");
+        const dg = document.getElementById("monDateGo");
+        const dchips = document.getElementById("monDates");
+        if (dp && dg && dchips) {
+          dg.addEventListener("click", () => { if (dp.value) loadDate(dp.value); });
+          window.MarketClient.tradingExecutions().then(r => {
+            const dates = (r && r.available_dates) || [];
+            dchips.innerHTML = dates.length
+              ? 'Dates with activity: ' + dates.slice(0, 8).map(d => '<button class="btn btn-ghost btn-sm monDateChip" data-d="' + esc(d) + '">' + esc(d) + '</button>').join(" ")
+              : 'No dated records yet.';
+            if (dates.length) { dp.max = dates[0]; dp.value = dates[0]; }
+            dchips.querySelectorAll(".monDateChip").forEach(b => b.addEventListener("click", () => { dp.value = b.dataset.d; loadDate(b.dataset.d); }));
+            loadDate(dp.value || dates[0] || "");
+          }).catch(() => { if (dp.value) loadDate(dp.value); });
+        }
       }).catch(e => { body.innerHTML = mktError(e); });
     };
     load();
