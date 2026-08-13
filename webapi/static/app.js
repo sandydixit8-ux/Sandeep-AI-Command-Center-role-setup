@@ -3283,11 +3283,80 @@
 
   function mMonitoring(body) {
     body.innerHTML = mktLoading();
-    Promise.allSettled([window.MarketClient.status(), window.MarketClient.quote("TCS"), window.MarketClient.score("TCS"), window.MarketClient.signal("TCS")]).then(([st, q, sc, sg]) => {
-      if (st.status !== "fulfilled") { body.innerHTML = mktError(st.reason); return; }
-      const s = st.value, quote = q.status === "fulfilled" ? q.value : null, score = sc.status === "fulfilled" ? sc.value : null, sig = sg.status === "fulfilled" ? sg.value : null;
-      body.innerHTML = `
-        <div class="card"><div class="card-title">Data provider</div>
+    const load = () => {
+      Promise.allSettled([
+        window.MarketClient.status(),
+        window.MarketClient.quote("TCS"),
+        window.MarketClient.score("TCS"),
+        window.MarketClient.signal("TCS"),
+        window.MarketClient.tradingPerformanceToday(),
+      ]).then(([st, q, sc, sg, tp]) => {
+        if (st.status !== "fulfilled") { body.innerHTML = mktError(st.reason); return; }
+        const s = st.value, quote = q.status === "fulfilled" ? q.value : null, score = sc.status === "fulfilled" ? sc.value : null, sig = sg.status === "fulfilled" ? sg.value : null;
+        const perf = (tp.status === "fulfilled" && tp.value && tp.value.performance) ? tp.value.performance : null;
+        const tr = (perf && perf.trading) || {}, pf = (perf && perf.portfolio) || {}, dy = (perf && perf.day) || {}, dl = (perf && perf.daily_loss) || {};
+        const run = tr.running === true;
+        const pnl = (dy.day_pnl || 0) >= 0;
+        const execRows = (perf && perf.activity && perf.activity.length)
+          ? perf.activity.map(a => {
+              const detail = a.symbol ? a.symbol + " x " + a.quantity : (a.detail || "");
+              const blocked = a.allowed === false;
+              return '<tr><td class="muted small">' + esc(a.ts) + '</td><td><span class="badge ' + (blocked ? "err" : "ok") + '">' + esc(a.action || "") + '</span></td><td class="small">' + esc(detail) + '</td><td>' + (blocked ? '<span class="err small">✗ ' + esc(a.blocked_by || "blocked") + '</span>' : '<span class="ok small">✓ executed</span>') + '</td></tr>';
+            }).join("")
+          : '<tr><td colspan="4" class="muted">No executions recorded today.</td></tr>';
+        const cycleRows = (perf && perf.cycles && perf.cycles.length)
+          ? perf.cycles.slice(0, 10).map(c => '<tr><td class="muted small">' + esc(c.ts) + '</td><td><span class="badge ' + (c.event === "cycle_error" ? "err" : c.event === "cycle" ? "ok" : "wait") + '">' + esc(c.event) + '</span></td><td class="small">' + esc(c.agent || c.reason || c.error || "") + '</td></tr>').join("")
+          : '<tr><td colspan="3" class="muted">No auto-trading events today.</td></tr>';
+
+        body.innerHTML = `
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+          <div class="grow"><div class="card-title" style="margin:0">📈 Performance &amp; Trade Execution</div>
+            <div class="muted small">Trading performance, executions and safety guard — auto-refreshes every 30s.</div></div>
+          <span class="badge ${run ? "ok" : "wait"}">${run ? "🟢 Auto-trading RUNNING" : "⏸ Auto-trading STOPPED"}</span>
+          <button class="btn btn-soft btn-sm" id="monRefresh">↻ Refresh</button>
+        </div>
+
+        <div class="dash-grid" style="margin-top:12px">
+          ${mktStat("Day P&L", (pnl ? "+" : "") + fmtInr(dy.day_pnl), fmtPct(dy.day_return_pct))}
+          ${mktStat("Realized today", fmtInr(dy.realized_today), (dy.sells_today || 0) + " sells · " + (dy.buys_today || 0) + " buys")}
+          ${mktStat("Unrealized", fmtInr(dy.unrealized_today), (pf.open_count || 0) + " open positions")}
+          ${mktStat("Cycles today", tr.cycles_today || 0, (tr.cycles_ok_today || 0) + " ok · " + (tr.cycles_error_today || 0) + " err")}
+          ${mktStat("Win rate", (pf.win_rate_pct_all || 0) + "%", "all-time paper")}
+          ${mktStat("Equity", fmtInr(dy.equity_now), "start " + fmtInr(dy.start_equity))}
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="spread"><div class="card-title">🛡️ Daily loss guard</div>
+            <span class="badge ${dl.tripped ? "err" : "ok"}">${dl.tripped ? "🚨 TRIPPED — new buys blocked" : "✅ HEALTHY"}</span></div>
+          <div class="row" style="gap:24px;flex-wrap:wrap;margin-top:6px">
+            <span class="muted small">Day loss: <b>${fmtInr(dl.daily_loss)}</b></span>
+            <span class="muted small">Limit: <b>${fmtInr(dl.limit_inr)}</b> (${dl.limit_pct || 0}%)</span>
+            ${dl.tripped_at ? '<span class="muted small">Tripped at: ' + esc(dl.tripped_at) + '</span>' : ""}
+          </div>
+          ${tr.last_result ? '<div class="muted small" style="margin-top:10px;white-space:pre-wrap">Last cycle: ' + esc(String(tr.last_result).slice(0, 320)) + '</div>' : ""}
+          ${tr.last_error ? '<div class="insight" style="margin-top:8px"><span class="ic">⚠️</span>Last error: ' + esc(String(tr.last_error).slice(0, 200)) + '</div>' : ""}
+        </div>
+
+        <div class="grid-2" style="margin-top:16px">
+          <div class="card"><div class="card-title">🧾 Trade executions today</div>
+            <div class="table-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Action</th><th>Detail</th><th>Status</th></tr></thead><tbody>
+            ${execRows}
+            </tbody></table></div>
+          </div>
+          <div class="card"><div class="card-title">⏱ Auto-trading events today</div>
+            <div class="table-wrap"><table class="tbl"><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>
+            ${cycleRows}
+            </tbody></table></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px"><div class="card-title">💼 Open positions</div>
+          <div class="table-wrap"><table class="tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Price</th><th>Value</th><th>Unrealized</th><th>Stop</th></tr></thead><tbody>
+          ${(pf.positions || []).map(pos => '<tr><td><b>' + esc(pos.symbol) + '</b></td><td>' + pos.quantity + '</td><td>' + fmtNum(pos.entry, 2) + '</td><td>' + fmtNum(pos.price, 2) + '</td><td>' + fmtInr(pos.value) + '</td><td class="' + (pos.unrealized_pnl >= 0 ? "up" : "down") + '">' + (pos.unrealized_pnl >= 0 ? "+" : "") + fmtInr(pos.unrealized_pnl) + '</td><td>' + fmtNum(pos.stop_loss, 2) + '</td></tr>').join("") || '<tr><td colspan="7" class="muted">No open positions.</td></tr>'}
+          </tbody></table></div>
+        </div>
+
+        <div class="card" style="margin-top:16px"><div class="card-title">Data provider</div>
           <div class="row small" style="gap:12px;flex-wrap:wrap"><span class="badge ok">● ${esc(s.provider)}</span><span class="badge wait">${esc(s.data)}</span><span class="badge">${esc(s.mode)}</span></div>
           <div class="muted small" style="margin-top:8px">Updated: ${esc(s.updated)}</div>
         </div>
@@ -3304,7 +3373,11 @@
             <div class="muted small" style="margin-top:8px">Score transparency: every factor is shown with evidence, so results are auditable.</div>
           </div>
         </div>`;
-    });
+        const rb = document.getElementById("monRefresh");
+        if (rb) rb.addEventListener("click", load);
+      }).catch(e => { body.innerHTML = mktError(e); });
+    };
+    load();
   }
 
   function mAudit(body) {
