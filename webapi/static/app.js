@@ -2284,43 +2284,607 @@
   }
 
   function optStrategy(body, a) {
-    const m = a.meta, an = a.analytics;
-    body.innerHTML = `
-      ${optHeader(m, an)}
-      <div class="card" style="margin-top:16px"><div class="card-title">Strategy Lab (${esc(m.underlying)} · ${esc(m.expiry)})</div>
-        <div class="grid-cards" id="optStratGrid">
-          ${a.strategies.map(s => '<div class="card" data-name="' + esc(s.name) + '" style="cursor:pointer"><div class="spread"><b>' + esc(s.display) + '</b><span class="badge ' + (s.risk_label === "DEFINED" ? "ok" : "wait") + '">' + esc(s.risk_label) + '</span></div><div class="row small muted" style="margin-top:8px"><span>Max P ' + fmtNum(s.max_profit, 0) + '</span><span class="grow"></span><span>Max L ' + fmtNum(s.max_loss, 0) + '</span></div><div class="muted small" style="margin-top:6px">Breakeven: ' + (s.breakevens || []).map(b => fmtNum(b, 0)).join(" / ") + '</div></div>').join("")}
-        </div>
-        <div id="optPayoff" style="margin-top:16px"></div>
-        <div class="muted small" style="margin-top:8px">${esc(a.strategies[0] ? a.strategies[0].note : "")} Past performance does not guarantee future results.</div>
-      </div>`;
-    $$("#optStratGrid [data-name]").forEach(card => card.addEventListener("click", () => {
-      const name = card.dataset.name;
-      const s = a.strategies.find(x => x.name === name);
-      if (!s) return;
-      mktAudit("OPTIONS strategy " + name);
+    const m = a.meta, an = a.analytics, sig = a.signal, srz = a.support_resistance || {}, scen = a.scenarios || [];
+    const strategies = a.strategies || [];
+    if (!strategies.length) { body.innerHTML = mktError(new Error("No strategy data available.")); return; }
+    const byName = {};
+    strategies.forEach(s => { byName[s.name] = s; });
+    const iv = an.iv || {}, pcr = an.pcr || {}, exp = an.expected_move || {};
+    const quality = m.quality && m.quality.status ? m.quality.status : "";
+    const stale = /delayed|partial|unavailable/i.test(quality);
+
+    const VIEWS = {
+      strong_bull: { heroEmoji: "🟢", hero: "Strongly Bullish", label: "Rise Strongly", color: "ok",
+        meaning: "The option chain and momentum point to a strongly bullish scenario. Call activity and price momentum are both positive.",
+        base: "Continue higher" },
+      mod_bull: { heroEmoji: "🟢", hero: "Moderately Bullish", label: "Rise Moderately", color: "ok",
+        meaning: "The market is showing more signs of moving upward, but strong resistance may limit the rise.",
+        base: "Range to mildly bullish" },
+      range: { heroEmoji: "🟡", hero: "Sideways / Range-bound", label: "Stay in a Range", color: "wait",
+        meaning: "Signals are balanced — neither buyers nor sellers clearly dominate. The market may stay inside a range.",
+        base: "Range / sideways" },
+      mod_bear: { heroEmoji: "🔴", hero: "Moderately Bearish", label: "Fall Moderately", color: "err",
+        meaning: "The market is showing more signs of moving downward, but strong support may limit the fall.",
+        base: "Range to mildly bearish" },
+      strong_bear: { heroEmoji: "🔴", hero: "Strongly Bearish", label: "Fall Strongly", color: "err",
+        meaning: "The option chain and momentum point to a strongly bearish scenario. Put activity and price momentum are both negative.",
+        base: "Continue lower" },
+      big_move: { heroEmoji: "⚡", hero: "Big Move Expected", label: "Move Sharply, Direction Unknown", color: "wait",
+        meaning: "Signals are stretched in both directions — the market may be preparing for a sharp move without a clear direction.",
+        base: "Large move, direction unclear" },
+    };
+    const META = {
+      long_call: { emoji: "📈", view: "Strong Bullish", risk: "🟢 Limited Risk", when: "Expect strong upside",
+        simple: "You expect NIFTY to rise significantly. You pay a premium for the right to benefit from an upward move.",
+        whyFit: "it captures the upside while your loss stays limited to the premium" },
+      long_put: { emoji: "📉", view: "Strong Bearish", risk: "🟢 Limited Risk", when: "Expect strong downside",
+        simple: "You expect NIFTY to fall significantly. You pay a premium for the right to benefit from a downward move.",
+        whyFit: "it captures the downside while your loss stays limited to the premium" },
+      bull_call_spread: { emoji: "📈", view: "Moderately Bullish", risk: "🟢 Limited Risk", when: "Expect controlled upside",
+        simple: "You are betting that NIFTY will move higher, but you also limit your risk by buying one call and selling another call.",
+        whyFit: "it limits the maximum loss while keeping a defined profit zone" },
+      bear_put_spread: { emoji: "📉", view: "Moderately Bearish", risk: "🟢 Limited Risk", when: "Expect controlled downside",
+        simple: "You expect NIFTY to fall, but want to keep the maximum loss limited.",
+        whyFit: "it limits the maximum loss while keeping a defined profit zone" },
+      strangle: { emoji: "↔️", view: "Big Move", risk: "🟢 Limited Risk", when: "Direction uncertain",
+        simple: "You expect NIFTY to make a large move, but you are unsure whether it will move up or down.",
+        whyFit: "it profits from a large move in either direction without betting on the direction" },
+      iron_condor: { emoji: "🛡️", view: "Sideways / Range", risk: "🟢 Limited Risk", when: "Expect a range",
+        simple: "You expect NIFTY to stay inside a range. You sell far-away options for premium and buy protection, keeping the loss limited.",
+        whyFit: "it collects premium in a range while the bought legs cap the risk" },
+      covered_call: { emoji: "🛡️", view: "Mildly Bullish", risk: "🟡 Moderate Risk", when: "You hold NIFTY-linked assets",
+        simple: "You already hold NIFTY-related assets and want to earn option premium while accepting limited upside.",
+        whyFit: "it earns premium on exposure you already hold" },
+    };
+    const WHY = {
+      long_call: "Your market view is bullish. A Long Call gives you full upside if NIFTY rises sharply, and your loss is limited to the premium you pay.",
+      long_put: "Your market view is bearish. A Long Put gives you full downside benefit if NIFTY falls sharply, with loss limited to the premium you pay.",
+      bull_call_spread: "You expect NIFTY to rise but want a known, limited worst-case loss. Buying one call and selling a higher call lowers the cost and caps the maximum loss.",
+      bear_put_spread: "You expect NIFTY to fall but want a known, limited worst-case loss. Buying one put and selling a lower put lowers the cost and caps the maximum loss.",
+      strangle: "Direction is uncertain but you expect a large move. Buying both a call and a put lets you profit from a sharp move either way.",
+      iron_condor: "You expect NIFTY to stay inside a range. Selling far-away options collects premium, while the bought legs cap the loss if it breaks out.",
+      covered_call: "You hold NIFTY exposure and expect limited upside. Selling a call earns premium, but you give up gains above the sold strike.",
+    };
+    const FITS = {
+      strong_bull: { long_call: 94, bull_call_spread: 86, covered_call: 80, iron_condor: 32, strangle: 38, long_put: 8, bear_put_spread: 8 },
+      mod_bull: { bull_call_spread: 93, covered_call: 86, long_call: 74, iron_condor: 50, strangle: 42, long_put: 14, bear_put_spread: 14 },
+      range: { iron_condor: 90, strangle: 76, covered_call: 62, bull_call_spread: 56, bear_put_spread: 56, long_call: 32, long_put: 32 },
+      mod_bear: { bear_put_spread: 93, long_put: 74, iron_condor: 50, strangle: 42, covered_call: 24, long_call: 14, bull_call_spread: 14 },
+      strong_bear: { long_put: 94, bear_put_spread: 86, iron_condor: 32, strangle: 38, covered_call: 6, long_call: 8, bull_call_spread: 8 },
+      big_move: { strangle: 90, iron_condor: 68, long_call: 55, long_put: 55, bull_call_spread: 40, bear_put_spread: 40, covered_call: 22 },
+    };
+    const VIEW_STRATS = {
+      strong_bull: ["long_call", "bull_call_spread", "covered_call"],
+      mod_bull: ["bull_call_spread", "long_call", "covered_call"],
+      range: ["iron_condor", "strangle", "covered_call"],
+      mod_bear: ["bear_put_spread", "long_put"],
+      strong_bear: ["long_put", "bear_put_spread"],
+      big_move: ["strangle", "iron_condor"],
+    };
+    const signalToView = { "Strongly Bullish": "strong_bull", "Mildly Bullish": "mod_bull", "Neutral": "range", "Mildly Bearish": "mod_bear", "Strongly Bearish": "strong_bear" };
+    const autoView = signalToView[sig.label] || "range";
+    const sup0 = (srz.support && srz.support[0] && srz.support[0].strike) || exp.lower || m.spot * 0.995;
+    const res0 = (srz.resistance && srz.resistance[0] && srz.resistance[0].strike) || exp.upper || m.spot * 1.005;
+    const majLow = exp.lower || m.spot * 0.99;
+    const majHigh = exp.upper || m.spot * 1.01;
+
+    const tip = (t) => '<span class="tip" tabindex="0" title="' + esc(t) + '" aria-label="' + esc(t) + '">ⓘ</span>';
+    const labState = { selected: null, view: autoView, override: false, advanced: false, today: false };
+
+    function fitFor(name, v) {
+      let f = (FITS[v] || {})[name];
+      if (f === undefined) f = 45;
+      if ((a.suggestions || []).some(x => x.name === name)) f += 6;
+      if (stale) f -= 5;
+      return Math.max(5, Math.min(99, Math.round(f)));
+    }
+    function volLabel() {
+      const r = (iv.regime || "").toUpperCase();
+      if (r === "LOW") return "🟢 Low";
+      if (r === "HIGH") return "🔴 High";
+      return "🟡 Moderate";
+    }
+    function sigCell(v) {
+      if (v === undefined || v === null) return '<span class="badge wait">—</span>';
+      if (v >= 0.55) return '<span class="badge ok">🟢 Positive</span>';
+      if (v <= 0.45) return '<span class="badge err">🔴 Negative</span>';
+      return '<span class="badge wait">🟡 Neutral</span>';
+    }
+    function edges(s) {
+      const ys = (s.payoff && s.payoff.y) || [];
+      const n = ys.length;
+      if (n < 4) return { risingLeft: false, risingRight: false, fallingLeft: false, fallingRight: false };
+      return {
+        risingLeft: ys[1] - ys[3] > 0,
+        risingRight: ys[n - 1] - ys[n - 3] > 0,
+        fallingLeft: ys[1] - ys[3] < 0,
+        fallingRight: ys[n - 1] - ys[n - 3] < 0,
+      };
+    }
+    function dirWord(s) {
+      if (s.name === "long_put" || s.name === "bear_put_spread") return "below";
+      if (s.name === "strangle" || s.name === "iron_condor") return "outside";
+      return "above";
+    }
+    function beDisplay(s) {
+      const bs = (s.breakevens || []).map(b => fmtNum(b, 0));
+      if (!bs.length) return "—";
+      if (bs.length === 1) return (dirWord(s) === "below" ? "Below" : "Above") + " ₹" + bs[0];
+      return "Outside ₹" + bs[0] + " – ₹" + bs[1];
+    }
+    function bePhrase(s) {
+      const bs = (s.breakevens || []).map(b => fmtNum(b, 0));
+      if (!bs.length) return "—";
+      if (bs.length === 1) return dirWord(s) + " ₹" + bs[0];
+      return "outside ₹" + bs[0] + " – ₹" + bs[1];
+    }
+    function bestFor(v) {
+      return strategies.slice().sort((x, y) => fitFor(y.name, v) - fitFor(x.name, v))[0];
+    }
+
+    function payoffSVG(s) {
       const pay = s.payoff || { x: [], y: [] };
-      const ys = pay.y || [];
-      const max = Math.max(...ys.map(Math.abs), 1);
-      const pts = (pay.x || []).map((x, i) => x + ":" + ys[i]);
-      $("#optPayoff").innerHTML = `
-        <div class="card"><div class="card-title">Payoff — ${esc(s.display)}</div>
-          <div class="row" style="flex-wrap:wrap;gap:12px">
-            ${mktStat("Max profit", fmtNum(s.max_profit, 0), "")}
-            ${mktStat("Max loss", fmtNum(s.max_loss, 0), "")}
-            ${mktStat("Est. margin", fmtInr(s.est_margin), "verify with broker")}
-            ${mktStat("Net premium", fmtNum(s.net_premium, 2), "per share")}
+      const xs = pay.x || [], ys = pay.y || [];
+      if (!xs.length || !ys.length || xs.length !== ys.length) return '<div class="muted small">Payoff data unavailable for this strategy.</div>';
+      const W = 460, H = 230, mL = 16, mR = 14, mT = 18, mB = 26;
+      const x0 = xs[0], x1 = xs[xs.length - 1];
+      let ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+      if (ymax - ymin < 1) { ymax += 1; ymin -= 1; }
+      const pad = (ymax - ymin) * 0.12;
+      const Ymin = ymin - pad, Ymax = ymax + pad;
+      const px = v => mL + (v - x0) / (x1 - x0) * (W - mL - mR);
+      const py = v => mT + (Ymax - v) / (Ymax - Ymin) * (H - mT - mB);
+      const zeroY = py(0);
+      const regions = [];
+      let cur = null;
+      for (let i = 0; i < ys.length; i++) {
+        const sgn = ys[i] > 0 ? 1 : ys[i] < 0 ? -1 : 0;
+        if (!cur || cur.sgn !== sgn) { cur = { sgn, pts: [[px(xs[i]), py(ys[i])]] }; regions.push(cur); }
+        else cur.pts.push([px(xs[i]), py(ys[i])]);
+      }
+      const fills = regions.filter(r => r.sgn !== 0).map(r => {
+        const d = "M" + r.pts.map(p => p[0].toFixed(2) + "," + p[1].toFixed(2)).join(" L")
+          + " L" + r.pts[r.pts.length - 1][0].toFixed(2) + "," + zeroY.toFixed(2)
+          + " L" + r.pts[0][0].toFixed(2) + "," + zeroY.toFixed(2) + " Z";
+        return '<path d="' + d + '" fill="' + (r.sgn > 0 ? "var(--ok-soft)" : "var(--err-soft)") + '" opacity="0.75"/>';
+      }).join("");
+      const poly = xs.map((x, i) => px(x).toFixed(2) + "," + py(ys[i]).toFixed(2)).join(" ");
+      const zeroAxis = '<line x1="' + px(x0).toFixed(2) + '" y1="' + zeroY.toFixed(2) + '" x2="' + px(x1).toFixed(2) + '" y2="' + zeroY.toFixed(2) + '" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="3 3"/>';
+      const spotX = px(m.spot);
+      const spotM = '<line x1="' + spotX.toFixed(2) + '" y1="' + mT + '" x2="' + spotX.toFixed(2) + '" y2="' + (H - mB) + '" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 3"/>'
+        + '<text x="' + (spotX + 3).toFixed(1) + '" y="' + (mT + 9) + '" font-size="9" fill="var(--accent)" font-weight="700">NIFTY ' + fmtNum(m.spot, 0) + '</text>';
+      const bps = (s.breakevens || []).map(b => {
+        const bx = px(b).toFixed(2);
+        return '<line x1="' + bx + '" y1="' + (zeroY - 4) + '" x2="' + bx + '" y2="' + (zeroY + 4) + '" stroke="#fff" stroke-width="3" stroke-linecap="round"/>'
+          + '<line x1="' + bx + '" y1="' + (zeroY - 4) + '" x2="' + bx + '" y2="' + (zeroY + 4) + '" stroke="var(--text)" stroke-width="1.2" stroke-linecap="round"/>'
+          + '<text x="' + bx + '" y="' + (zeroY - 7) + '" font-size="9" fill="var(--text-3)" text-anchor="middle">BE ' + fmtNum(b, 0) + '</text>';
+      }).join("");
+      let mi = 0, li = 0;
+      ys.forEach((y, i) => { if (y > ys[mi]) mi = i; if (y < ys[li]) li = i; });
+      const mp = '<circle cx="' + px(xs[mi]).toFixed(2) + '" cy="' + py(ys[mi]).toFixed(2) + '" r="3.2" fill="var(--ok)"/><text x="' + px(xs[mi]).toFixed(2) + '" y="' + (py(ys[mi]) - 5).toFixed(2) + '" font-size="9" fill="var(--ok)" text-anchor="middle" font-weight="700">Max P</text>';
+      const ml = '<circle cx="' + px(xs[li]).toFixed(2) + '" cy="' + py(ys[li]).toFixed(2) + '" r="3.2" fill="var(--err)"/><text x="' + px(xs[li]).toFixed(2) + '" y="' + (py(ys[li]) + 12).toFixed(2) + '" font-size="9" fill="var(--err)" text-anchor="middle" font-weight="700">Max L</text>';
+      const xlabels = [[x0, "start"], [m.spot, "middle"], [x1, "end"]].map(p => '<text x="' + px(p[0]).toFixed(1) + '" y="' + (H - 8) + '" font-size="9" fill="var(--text-3)" text-anchor="' + p[1] + '">' + fmtNum(p[0], 0) + '</text>').join("");
+      const ylabels = [Ymax, 0, Ymin].map(v => '<text x="4" y="' + (py(v) + 3).toFixed(1) + '" font-size="9" fill="var(--text-3)">' + fmtInr(v) + '</text>').join("");
+      return '<div style="position:relative;width:100%;max-width:780px">'
+        + '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto;opacity:' + (labState.today ? 0.55 : 1) + '" role="img" aria-label="Payoff chart for ' + esc(s.display) + '">'
+        + fills + zeroAxis
+        + '<polyline points="' + poly + '" fill="none" stroke="var(--text)" stroke-width="1.8" stroke-linejoin="round"/>'
+        + spotM + bps + mp + ml + xlabels + ylabels
+        + '</svg>'
+        + '<div class="lab-payoff-legend">'
+        + '<span><span class="dot ok"></span> Profit</span>'
+        + '<span><span class="dot err"></span> Loss</span>'
+        + '<span><span class="dot wait"></span> Break-even</span>'
+        + '<span>📍 Current NIFTY</span>'
+        + '</div>'
+        + '<div class="muted small" style="margin-top:6px">X = NIFTY price at expiry · Y = profit/loss per lot (₹).</div>'
+        + '</div>';
+    }
+
+    function renderDetail() {
+      const s = labState.selected; if (!s) return;
+      const e = edges(s);
+      const profitUnlimited = e.risingLeft || e.risingRight;
+      const lossUnlimited = e.fallingLeft || e.fallingRight;
+      const riskHTML = s.name === "covered_call"
+        ? '<div style="font-size:20px;font-weight:900">🟡 Moderate Risk</div><p class="muted small" style="margin-top:6px">Your main risk is the value of the NIFTY-linked asset you hold falling. The premium you earn offsets only part of that decline.</p>'
+        : lossUnlimited
+          ? '<div style="font-size:20px;font-weight:900">🔴 High Risk</div><p class="muted small" style="margin-top:6px">Your potential loss may increase substantially if the market moves against you.</p>'
+          : '<div style="font-size:20px;font-weight:900">🟢 Limited Risk</div><p class="muted small" style="margin-top:6px">Your maximum loss is known before entering the trade.</p>';
+      const el = document.getElementById("labDetail");
+      if (!el) return;
+      el.innerHTML = `
+        <div class="card" style="margin-top:14px"><div class="card-title">Profit &amp; Loss — ${esc(s.display)} ${tip("These are calculated from today's option prices at expiry. Actual results before expiry can differ because of time value, implied volatility and other factors.")}</div>
+          <div class="lab-pnl" style="margin-top:12px">
+            <div class="lab-pnl-card ok"><div style="font-weight:700">💰 Maximum Profit</div>
+              <div class="val">${profitUnlimited ? "Unlimited" : fmtInr(s.max_profit)}</div>
+              ${profitUnlimited ? '<p>Profit can keep increasing if NIFTY moves further in the favourable direction (reaches ₹' + fmtNum(s.max_profit, 0) + ' at the edge of this chart).</p>' : "<p>Best-case result if the move is large enough.</p>"}
+            </div>
+            <div class="lab-pnl-card err"><div style="font-weight:700">🔴 Maximum Loss</div>
+              <div class="val">${lossUnlimited ? "Potentially Unlimited" : fmtInr(-s.max_loss)}</div>
+              ${lossUnlimited ? "<p>Your potential loss may increase substantially if the market moves against you.</p>" : "<p>Your maximum loss is known before entering the trade.</p>"}
+            </div>
+            <div class="lab-pnl-card info"><div style="font-weight:700">📍 Profit Starts</div>
+              <div class="val">${beDisplay(s)}</div>
+              <p>At expiry, NIFTY generally needs to be ${bePhrase(s)} for the strategy to move into profit.</p>
+            </div>
           </div>
-          <div style="position:relative;height:160px;margin-top:10px">
-            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">
-              <line x1="0" y1="50" x2="100" y2="50" stroke="var(--border)" stroke-width=".3"/>
-              <line x1="50" y1="0" x2="50" y2="100" stroke="var(--border)" stroke-width=".3"/>
-              <polyline points="${pts.map(p => { const [x, y] = p.split(":"); return (x - pay.x[0]) / (pay.x[pay.x.length - 1] - pay.x[0]) * 100 + "," + (50 - y / max * 45); }).join(" ")}" fill="none" stroke="var(--ok)" stroke-width=".8" stroke-linejoin="round"/>
-            </svg>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
+            <div class="card-title grow" style="margin:0">⚠️ Risk Level</div>
           </div>
-          <div class="muted small" style="margin-top:6px">X = underlying price · Y = P&L per lot (₹).</div>
+          ${riskHTML}
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
+            <div class="card-title grow" style="margin:0">📍 Break-even</div>
+            ${tip("Break-even is the approximate price where the strategy moves from loss to profit at expiry, based on the calculated payoff.")}
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:12px;align-items:center;margin-top:8px">
+            <div style="font-size:26px;font-weight:900">${beDisplay(s)}</div>
+          </div>
+          <p class="muted small" style="margin-top:8px">At expiry, the strategy generally needs NIFTY ${bePhrase(s)} to move into profit. Real-world P&amp;L before expiry can differ because of time value, implied volatility and other factors.</p>
+        </div>
+        <div id="labPayoff" style="margin-top:14px"></div>
+        <div class="card" style="margin-top:14px"><div class="card-title">💡 In simple words</div>
+          <p style="font-size:16px;line-height:1.6;margin:8px 0 0;color:var(--text-2)">${esc(META[s.name].simple)}</p>
         </div>`;
+      renderPayoff();
+    }
+
+    function renderPayoff() {
+      const el = document.getElementById("labPayoff");
+      if (!el || !labState.selected) return;
+      el.innerHTML = `
+        <div class="card">
+          <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
+            <div class="card-title grow" style="margin:0">📈 Profit / Loss ${labState.today ? "(Today)" : "(At Expiry)"}</div>
+            <div class="lab-seg" role="tablist" aria-label="Payoff horizon">
+              <button data-pay="expiry" class="${labState.today ? "" : "sel"}">At Expiry</button>
+              <button data-pay="today" class="${labState.today ? "sel" : ""}">Today</button>
+            </div>
+          </div>
+          ${payoffSVG(labState.selected)}
+          <div id="labTodayNote" class="hint" style="margin-top:8px">${labState.today ? "Same-day P&amp;L depends on live implied volatility and time decay (theta), which we do not estimate accurately — so the curve above is still the at-expiry payoff. Your intraday result will differ." : ""}</div>
+        </div>`;
+      $$("#labPayoff [data-pay]").forEach(b => b.addEventListener("click", () => {
+        labState.today = b.dataset.pay === "today";
+        renderPayoff();
       }));
+    }
+
+    function selectStrategy(name) {
+      const s = byName[name];
+      if (!s) return;
+      labState.selected = s;
+      mktAudit("LAB select " + name);
+      renderDetail();
+      renderCompare();
+    }
+
+    function renderRec() {
+      const el = document.getElementById("labRec");
+      if (!el) return;
+      const v = VIEWS[labState.view];
+      const s = bestFor(labState.view);
+      const fit = fitFor(s.name, labState.view);
+      el.innerHTML = `
+        <div class="card lab-rec" style="margin-top:14px">
+          <div class="card-title">🎯 Strategy Recommendation</div>
+          ${labState.override ? '<div class="badge wait" style="margin-top:8px">You selected: ' + esc(v.hero) + ' — overrides the market view (' + esc(VIEWS[autoView].hero) + '). <button class="btn btn-soft" id="labResetView" style="margin-left:8px">Use market view</button></div>' : ""}
+          <div class="row" style="flex-wrap:wrap;gap:16px;margin-top:10px;align-items:center">
+            <div class="grow">
+              <div class="lab-rec-name">⭐ ${META[s.name].emoji} ${esc(s.display)}</div>
+              <div class="muted" style="margin-top:2px">Market view: ${v.heroEmoji} ${esc(v.hero)}</div>
+              <div class="row" style="gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+                <div class="grow" style="max-width:320px"><div class="muted small" style="margin-bottom:4px">Strategy Fit ${tip("A heuristic score (0–100) of how well the strategy matches the market view. It is a match score, not a profit forecast.")}</div>
+                  <div class="lab-bar ${v.color}"><i style="width:${fit}%"></i></div></div>
+                <div style="font-size:20px;font-weight:900">${fit} / 100</div>
+              </div>
+              <div class="muted small" style="margin-top:10px">This strategy currently matches the selected market scenario — it is not a guarantee of profit.</div>
+            </div>
+          </div>
+          <div class="lab-rec-why"><b>Why this strategy?</b> ${esc(WHY[s.name])}</div>
+        </div>`;
+      const reset = document.getElementById("labResetView");
+      if (reset) reset.addEventListener("click", () => { labState.view = autoView; labState.override = false; renderViews(); renderRec(); renderFiltered(); renderAI(); });
+    }
+
+    function renderCompare() {
+      const el = document.getElementById("labCompare");
+      if (!el) return;
+      el.innerHTML = strategies.map(s => `
+        <div class="lab-cmp${labState.selected && labState.selected.name === s.name ? " sel" : ""}" data-lab-strat="${esc(s.name)}" role="button" tabindex="0" aria-label="Show ${esc(s.display)} details">
+          <h4>${META[s.name].emoji} ${esc(s.display)}</h4>
+          <div class="m">
+            <div class="spread"><span>View</span><b>${esc(META[s.name].view)}</b></div>
+            <div class="spread"><span>Risk</span><b>${META[s.name].risk}</b></div>
+            <div class="spread"><span>Best when</span><b>${esc(META[s.name].when)}</b></div>
+            <div class="spread"><span>Fit (current view)</span><b>${fitFor(s.name, labState.view)} / 100</b></div>
+          </div>
+        </div>`).join("");
+      $$("#labCompare [data-lab-strat]").forEach(c => c.addEventListener("click", () => selectStrategy(c.dataset.labStrat)));
+      $$("#labCompare [data-lab-strat]").forEach(c => c.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectStrategy(c.dataset.labStrat); }
+      }));
+    }
+
+    function renderFiltered() {
+      const el = document.getElementById("labFiltered");
+      if (!el) return;
+      const names = VIEW_STRATS[labState.view] || [];
+      el.innerHTML = '<div class="muted small" style="margin:10px 0 6px">Strategies matching your view — ' + esc(VIEWS[labState.view].hero) + ':</div>' + names.map(n => {
+        const s = byName[n]; if (!s) return "";
+        const fit = fitFor(n, labState.view);
+        return '<div class="lab-fit-row card" data-lab-strat="' + esc(n) + '" role="button" tabindex="0" style="cursor:pointer">'
+          + '<b>' + META[n].emoji + ' ' + esc(s.display) + '</b>'
+          + '<span class="badge">Fit ' + fit + '/100</span>'
+          + '<span class="muted small grow">' + esc(META[n].when) + '</span>'
+          + '<span class="muted small">' + esc(META[n].simple) + '</span>'
+          + '</div>';
+      }).join("");
+      $$("#labFiltered [data-lab-strat]").forEach(c => c.addEventListener("click", () => selectStrategy(c.dataset.labStrat)));
+    }
+
+    function renderViews() {
+      const el = document.getElementById("labViews");
+      if (!el) return;
+      el.innerHTML = Object.keys(VIEWS).map(k => {
+        const v = VIEWS[k];
+        return '<button data-view="' + k + '" class="' + (labState.view === k ? "sel" : "") + '">' + v.heroEmoji + " " + esc(v.label) + '</button>';
+      }).join("");
+      $$("#labViews [data-view]").forEach(b => b.addEventListener("click", () => {
+        labState.view = b.dataset.view;
+        labState.override = b.dataset.view !== autoView;
+        renderViews();
+        renderRec();
+        renderFiltered();
+        renderAI();
+      }));
+    }
+
+    function renderAI() {
+      const el = document.getElementById("labAI");
+      if (!el) return;
+      const v = VIEWS[labState.view];
+      const rec = labState.selected;
+      const pcrTxt = pcr.pcr_oi === undefined || pcr.pcr_oi === null ? "" : (pcr.pcr_oi > 1 ? "Put buyers have been slightly more active" : "Call buyers have been slightly more active") + " (Put/Call Ratio " + pcr.pcr_oi + "). ";
+      const ivTxt = iv.atm_iv ? "Implied volatility is " + (iv.atm_iv * 100).toFixed(1) + "% — " + ((iv.regime || "").toUpperCase() === "LOW" ? "the market is not pricing large swings right now." : (iv.regime || "").toUpperCase() === "HIGH" ? "the market is pricing larger swings right now." : "a normal level of expected movement.") + " " : "";
+      const srTxt = "Option-chain support is near " + fmtNum(sup0, 0) + " and resistance near " + fmtNum(res0, 0) + ". ";
+      const overrideNote = labState.override ? "Based on the scenario you selected, " : "Based on the current scenario, ";
+      el.innerHTML = '<div class="card lab-ai" style="margin-top:14px"><div class="card-title">🤖 AI Market Summary</div><div class="lab-ai-body">'
+        + '<p><b>' + v.heroEmoji + " NIFTY is currently " + v.hero + ".</b></p>"
+        + "<p>" + pcrTxt + ivTxt + srTxt + "</p>"
+        + "<p><b>Base scenario:</b> " + v.base + ". <b>Bullish trigger:</b> sustained move above " + fmtNum(res0, 0) + ". <b>Bearish trigger:</b> break below " + fmtNum(sup0, 0) + ".</p>"
+        + "<p>" + overrideNote + "a <b>" + esc(rec.display) + "</b> has a better-defined risk profile than a naked position because " + esc(META[rec.name].whyFit) + ".</p>"
+        + '</div><div class="muted small" style="margin-top:8px">Generated from the live option chain. Analytical estimate, not investment advice.</div></div>';
+    }
+
+    function renderAdvanced() {
+      const el = document.getElementById("labAdvanced");
+      if (!el) return;
+      const byStrike = {};
+      (a.contracts || []).forEach(c => {
+        if (!byStrike[c.strike]) byStrike[c.strike] = {};
+        byStrike[c.strike][c.option_type] = c;
+      });
+      const strikes = Object.keys(byStrike).map(Number).sort((x, y) => Math.abs(x - m.spot) - Math.abs(y - m.spot)).slice(0, 6).sort((x, y) => x - y);
+      const rows = strikes.map(k => {
+        const ce = byStrike[k].CE, pe = byStrike[k].PE;
+        const cell = (c) => c ? fmtNum(c.ltp, 1) + '<div class="muted small">IV ' + (c.iv ? (c.iv * 100).toFixed(1) + "%" : "—") + " · ΔOI " + (c.change_oi >= 0 ? "+" : "") + fmtNum(c.change_oi, 0) + "</div>" : "—";
+        return '<tr><td><b>' + fmtNum(k, 0) + '</b></td><td>' + cell(ce) + '</td><td>' + cell(pe) + '</td></tr>';
+      }).join("");
+      const greeksTip = (name, g, t) => name + " " + tip(t);
+      el.innerHTML = `
+        <div class="card" style="margin-top:14px"><div class="card-title">⚙️ Advanced — Option Chain &amp; Metrics</div>
+          <div class="row" style="flex-wrap:wrap;gap:8px;margin-top:8px;font-size:12.5px;color:var(--text-3)">
+            ${greeksTip("IV", "", "Implied Volatility shows how much movement the options market is expecting.")}
+            ${greeksTip("OI", "", "Open Interest shows the number of active option contracts.")}
+            ${greeksTip("PCR", "", "Put/Call Ratio compares put activity with call activity.")}
+            ${greeksTip("Delta", "", "Delta estimates how much an option's price may change when NIFTY moves by 1 point.")}
+            ${greeksTip("Gamma", "", "Gamma shows how much Delta itself changes as NIFTY moves.")}
+            ${greeksTip("Theta", "", "Theta represents the effect of time passing on an option's value.")}
+            ${greeksTip("Vega", "", "Vega shows how an option's price reacts to a 1% change in implied volatility.")}
+          </div>
+          <div class="table-wrap" style="margin-top:10px"><table class="tbl">
+            <thead><tr><th>Strike</th><th>Call (CE) ${tip("A call gives the right to buy at the strike.")}</th><th>Put (PE) ${tip("A put gives the right to sell at the strike.")}</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table></div>
+          <div class="grid-2" style="margin-top:12px;gap:10px">
+            <div class="card" style="padding:12px"><div class="card-sub" style="margin-bottom:6px">Chain metrics</div>
+              <div class="spread"><span class="muted">PCR (OI)</span><span>${pcr.pcr_oi ?? "—"}</span></div>
+              <div class="spread"><span class="muted">PCR (Volume)</span><span>${pcr.pcr_volume ?? "—"}</span></div>
+              <div class="spread"><span class="muted">ATM IV</span><span>${iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—"}</span></div>
+              <div class="spread"><span class="muted">IV regime</span><span>${esc(iv.regime || "—")}</span></div>
+              <div class="spread"><span class="muted">Max pain</span><span>${fmtNum((an.max_pain || {}).max_pain, 0)}</span></div>
+              <div class="spread"><span class="muted">Expected move</span><span>${fmtNum(exp.lower, 0)} – ${fmtNum(exp.upper, 0)}</span></div>
+              <div class="spread"><span class="muted">CE OI / PE OI</span><span>${fmtNum((an.oi || {}).total_ce_oi, 0)} / ${fmtNum((an.oi || {}).total_pe_oi, 0)}</span></div>
+              <div class="spread"><span class="muted">Liquidity</span><span>${esc((an.liquidity || {}).grade || "—")}</span></div>
+              <div class="spread"><span class="muted">Unusual activity</span><span>${(an.unusual_activity || []).length} item(s)</span></div>
+              <div class="spread"><span class="muted">Data quality</span><span>${esc(quality)}</span></div>
+            </div>
+            <div class="card" style="padding:12px"><div class="card-sub" style="margin-bottom:6px">Signal components (0–1) ${tip("Raw sub-scores behind the market view. Higher = more positive for the bullish side.")}</div>
+              ${Object.keys((sig.components || {})).map(k => '<div class="spread"><span class="muted">' + esc(k) + '</span><span>' + Number(sig.components[k]).toFixed(2) + " × w" + Number((sig.weights || {})[k] || 0).toFixed(2) + '</span></div>').join("")}
+              <div class="spread" style="margin-top:6px"><span class="muted">Signal score</span><b>${sig.score}/100 · ${esc(sig.label)}</b></div>
+            </div>
+          </div>
+          <div class="muted small" style="margin-top:8px">${esc((sig.disclaimer || "") + " " + (exp.label || ""))}</div>
+        </div>`;
+    }
+
+    function renderSnapshotChange() {
+      const el = document.getElementById("labChange");
+      if (!el) return;
+      const hdr = {};
+      const tok = window.API_TOKEN || (localStorage && localStorage.getItem("api_token")) || "";
+      if (tok) hdr["X-API-Key"] = tok;
+      fetch("/api/v1/market/indices", { headers: hdr })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d) return;
+          const arr = Array.isArray(d) ? d : (d.indices || []);
+          const n = arr.find(x => (x.symbol || "") === "NIFTY 50") || arr.find(x => /^NIFTY(\s|$)/.test(x.symbol || ""));
+          if (!n || n.change === undefined) return;
+          const cls = n.change >= 0 ? "up" : "down";
+          el.innerHTML = '<span class="' + cls + '">' + (n.change >= 0 ? "+" : "") + fmtNum(n.change, 2) + " (" + (n.change >= 0 ? "+" : "") + n.change_pct.toFixed(2) + "%)</span>";
+          el.classList.remove("muted");
+        })
+        .catch(() => { el.innerHTML = "—"; });
+    }
+
+    const comp = (sig.components) || {};
+    const v = VIEWS[autoView];
+    const supW = Math.max(4, (sup0 - majLow) / (majHigh - majLow) * 100);
+    const rangeW = Math.max(4, (res0 - sup0) / (majHigh - majLow) * 100);
+    const bullW = Math.max(4, 100 - supW - rangeW);
+    const spotPct = Math.max(3, Math.min(97, (m.spot - majLow) / (majHigh - majLow) * 100));
+    const staleBadge = stale ? '<span class="lab-stale">⚠️ Market data delayed</span>' : "";
+    const supStrong = (srz.support || []).length ? '<span class="badge ok">🟢 Strong</span>' : '<span class="badge wait">🟡 Light</span>';
+    const resStrong = (srz.resistance || []).length ? '<span class="badge wait">🟡 Important</span>' : '<span class="badge ok">🟢 Open</span>';
+
+    body.innerHTML = `
+      <div class="lab">
+        <div class="row" style="flex-wrap:wrap;gap:14px;align-items:flex-start">
+          <div class="grow">
+            <h1 class="lab-title">🧠 NIFTY Strategy Lab</h1>
+            <div class="muted" style="margin-top:2px">Understand the market first. Choose the strategy second.</div>
+            <div class="lab-expiry">NIFTY · <b>${esc(m.expiry)}</b> Expiry</div>
+          </div>
+          <div class="lab-mode" id="labMode" role="tablist" aria-label="View mode">
+            <button data-lab-mode="beginner" class="sel">👤 Beginner</button>
+            <button data-lab-mode="advanced">⚙️ Advanced</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:16px">
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <div class="card-title grow" style="margin:0">📊 NIFTY Market Snapshot</div>
+            <span class="muted small">Data updated: ${esc(m.timestamp)}</span> ${staleBadge}
+          </div>
+          <div class="lab-kpis">
+            <div class="lab-kpi"><div class="lab-kpi-label">NIFTY Spot</div><div class="lab-kpi-value">₹${fmtNum(m.spot, 2)}</div><div class="muted small">${esc(m.market_state)} · ${esc(m.source)}</div></div>
+            <div class="lab-kpi"><div class="lab-kpi-label">Today's Change</div><div class="lab-kpi-value muted" id="labChange">…</div><div class="muted small">vs previous close</div></div>
+            <div class="lab-kpi"><div class="lab-kpi-label">Market Trend ${tip("Derived from option-chain signals (PCR, OI positioning, momentum). It is a probabilistic read, not a prediction.")}</div><div class="lab-kpi-value">${v.heroEmoji} ${esc(v.hero)}</div><div class="muted small">based on the option chain</div></div>
+            <div class="lab-kpi"><div class="lab-kpi-label">Confidence ${tip("A 0–100 score for how consistently the current option-chain signals agree. Lower confidence means the picture is more mixed.")}</div><div class="lab-kpi-value">${sig.score} / 100</div><div class="muted small">${esc(sig.confidence || "—")} confidence</div></div>
+            <div class="lab-kpi"><div class="lab-kpi-label">Volatility ${tip("Volatility shows how much movement the options market expects. Low = cheaper options and smaller expected swings; High = bigger expected swings.")}</div><div class="lab-kpi-value">${volLabel()}</div><div class="muted small">ATM IV ${iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—"}</div></div>
+          </div>
+          <div class="muted small" style="margin-top:10px">Put/Call Ratio ${pcr.pcr_oi ?? "—"} ${tip("Put/Call Ratio compares put activity with call activity. Above ~1 = more put activity; below ~1 = more call activity.")} shows the balance between put and call activity.</div>
+        </div>
+
+        <div class="card lab-outlook ${v.color}" style="margin-top:14px">
+          <div class="card-title">🔮 NIFTY Outlook</div>
+          <div class="lab-outlook-big">${v.heroEmoji} ${esc(v.hero)}</div>
+          <div class="lab-outlook-mean">${esc(v.meaning)}</div>
+          <div class="row" style="gap:12px;align-items:center;margin-top:12px;flex-wrap:wrap">
+            <div class="grow" style="max-width:460px">
+              <div class="muted small" style="margin-bottom:4px">Confidence</div>
+              <div class="lab-bar ${v.color}"><i style="width:${sig.score}%"></i></div>
+            </div>
+            <div style="font-size:22px;font-weight:900">${sig.score} / 100</div>
+          </div>
+          <div class="muted small" style="margin-top:10px">This is an analysis of current signals — it is not a guarantee of what NIFTY will do next.</div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">🎯 Possible NIFTY Scenarios</div>
+          <div class="lab-zonebar" role="img" aria-label="Scenario map">
+            <div class="zone bear" style="flex:0 0 ${supW}%">🔴<span>Below ${fmtNum(sup0, 0)}</span><small>Bearish Zone</small></div>
+            <div class="zone range" style="flex:0 0 ${rangeW}%">🟡<span>${fmtNum(sup0, 0)} – ${fmtNum(res0, 0)}</span><small>Range / Sideways</small></div>
+            <div class="zone bull" style="flex:0 0 ${bullW}%">🟢<span>Above ${fmtNum(res0, 0)}</span><small>Bullish Zone</small></div>
+            <div class="spotmark" style="left:${spotPct}%"><b>NIFTY ${fmtNum(m.spot, 0)}</b></div>
+          </div>
+          <div class="muted small" style="margin-top:8px">Levels are estimates from the option chain (OI + implied move) — not guaranteed targets.</div>
+          <div class="lab-zone-grid">
+            <div class="lab-zone ok"><h4>🟢 Bullish Scenario</h4><p>If NIFTY breaks and sustains above ${fmtNum(res0, 0)}, the upside scenario becomes stronger.</p></div>
+            <div class="lab-zone wait"><h4>🟡 Range Scenario</h4><p>If NIFTY remains between ${fmtNum(sup0, 0)} and ${fmtNum(res0, 0)}, the market may move sideways.</p></div>
+            <div class="lab-zone err"><h4>🔴 Bearish Scenario</h4><p>If NIFTY breaks below ${fmtNum(sup0, 0)}, downside risk increases.</p></div>
+          </div>
+        </div>
+
+        <div class="lab-sr" style="margin-top:14px">
+          <div class="lab-sr-card ok"><div style="font-weight:700">🟢 Support</div>
+            <div class="num">${fmtNum(sup0, 0)}</div>
+            <p>A price area where buying interest may appear ${tip("Support is estimated from where option open interest (OI) is concentrated. It is an area of possible buying, not a guaranteed floor.")}</p>
+            <div class="maj">Major support: ${fmtNum(majLow, 0)}</div>
+          </div>
+          <div class="lab-sr-card err"><div style="font-weight:700">🔴 Resistance</div>
+            <div class="num">${fmtNum(res0, 0)}</div>
+            <p>A price area where selling pressure may appear ${tip("Resistance is estimated from where option open interest (OI) is concentrated. It is an area of possible selling, not a guaranteed ceiling.")}</p>
+            <div class="maj">Major resistance: ${fmtNum(majHigh, 0)}</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">🔍 Why this market view?</div>
+          <div class="table-wrap" style="margin-top:10px"><table class="tbl lab-signal">
+            <thead><tr><th>Signal</th><th>Reading</th><th>What it means</th></tr></thead>
+            <tbody>
+              <tr><td>Price Trend ${tip("Whether option-chain momentum is trending up or down.")}</td><td>${sigCell(comp.momentum)}</td><td class="muted">Prices and positioning are trending ${(comp.momentum || 0) >= 0.55 ? "up" : (comp.momentum || 0) <= 0.45 ? "down" : "sideways"}</td></tr>
+              <tr><td>Option Positioning ${tip("How option buyers are positioned, measured through the Put/Call Ratio.")}</td><td>${sigCell(comp.positioning)}</td><td class="muted">Buyers favour ${(comp.positioning || 0) >= 0.55 ? "calls" : (comp.positioning || 0) <= 0.45 ? "puts" : "a balance of both"}</td></tr>
+              <tr><td>Activity / Breadth ${tip("Whether fresh activity is concentrated in calls or puts.")}</td><td>${sigCell(comp.activity)}</td><td class="muted">Fresh activity is ${(comp.activity || 0) >= 0.55 ? "in calls" : (comp.activity || 0) <= 0.45 ? "in puts" : "balanced"}</td></tr>
+              <tr><td>Support ${tip("Buying interest estimated from option OI concentration.")}</td><td>${supStrong}</td><td class="muted">Buyers active near support</td></tr>
+              <tr><td>Resistance ${tip("Selling pressure estimated from option OI concentration.")}</td><td>${resStrong}</td><td class="muted">Upside may face selling</td></tr>
+              <tr><td>Volatility ${tip("How large a move the options market expects.")}</td><td><span class="badge">${volLabel()}</span></td><td class="muted">${(iv.regime || "").toUpperCase() === "LOW" ? "Smaller moves expected — cheaper options" : (iv.regime || "").toUpperCase() === "HIGH" ? "Larger moves expected — pricier options" : "Moderate expected movement"}</td></tr>
+            </tbody>
+          </table></div>
+          <details style="margin-top:10px"><summary class="muted small" style="cursor:pointer">Advanced details ▼</summary>
+            <div class="grid-2" style="margin-top:8px;gap:10px">
+              <div class="card" style="padding:12px"><div class="card-sub" style="margin-bottom:6px">Signal components (0–1) ${tip("Raw sub-scores behind the view. Higher = more bullish. Weights sum to 1.")}</div>
+                ${Object.keys(comp).map(k => '<div class="spread"><span class="muted">' + esc(k) + '</span><span>' + Number(comp[k]).toFixed(2) + " × w" + Number((sig.weights || {})[k] || 0).toFixed(2) + '</span></div>').join("")}
+                <div class="spread" style="margin-top:6px"><span class="muted">Signal score</span><b>${sig.score}/100 · ${esc(sig.label)}</b></div>
+              </div>
+              <div class="card" style="padding:12px"><div class="card-sub" style="margin-bottom:6px">Chain snapshot</div>
+                <div class="spread"><span class="muted">PCR (OI)</span><span>${pcr.pcr_oi ?? "—"}</span></div>
+                <div class="spread"><span class="muted">PCR (Volume)</span><span>${pcr.pcr_volume ?? "—"}</span></div>
+                <div class="spread"><span class="muted">ATM IV</span><span>${iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—"}</span></div>
+                <div class="spread"><span class="muted">Max pain</span><span>${fmtNum((an.max_pain || {}).max_pain, 0)}</span></div>
+                <div class="spread"><span class="muted">Data quality</span><span>${esc(quality)}</span></div>
+              </div>
+            </div>
+            <div class="muted small" style="margin-top:8px">${esc(sig.disclaimer || "")}</div>
+          </details>
+        </div>
+
+        <div id="labRec"></div>
+        <div id="labDetail"></div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">🔎 Compare Strategies</div>
+          <div class="lab-compare" id="labCompare"></div>
+          <div class="muted small" style="margin-top:10px">Each strategy below is shown with its market view, risk and best use. Click one to see its full payoff.</div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-title">Which strategy should I look at?</div>
+          <div class="muted small">What do you expect NIFTY to do? Pick a view and matching strategies appear below.</div>
+          <div class="lab-views" id="labViews"></div>
+          <div id="labFiltered"></div>
+        </div>
+
+        <div id="labAI"></div>
+
+        <div class="lab-disclaimer">⚠️ <b>Risk Warning:</b> Options involve significant risk and are not suitable for every investor. Market scenarios and strategy scores are analytical estimates, not guaranteed predictions or investment advice. Review the complete payoff, costs, liquidity and risk before taking any position.</div>
+
+        <div id="labAdvanced" hidden></div>
+      </div>`;
+
+    labState.selected = bestFor(autoView);
+    renderSnapshotChange();
+    renderRec();
+    renderDetail();
+    renderCompare();
+    renderFiltered();
+    renderViews();
+    renderAI();
+
+    $$("#labMode button").forEach(btn => btn.addEventListener("click", () => {
+      $$("#labMode button").forEach(x => x.classList.remove("sel"));
+      btn.classList.add("sel");
+      labState.advanced = btn.dataset.labMode === "advanced";
+      const adv = document.getElementById("labAdvanced");
+      if (adv) { adv.hidden = !labState.advanced; if (labState.advanced) renderAdvanced(); }
+    }));
   }
 
   /* ---------------- Option Intelligence layer ---------------- */

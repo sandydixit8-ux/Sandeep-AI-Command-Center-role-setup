@@ -1,6 +1,6 @@
 # AI Command Center — Production-Readiness QA Report
 
-**Date:** 2026-08-12
+**Date:** 2026-08-13
 **Decision: CONDITIONAL GO** — approved for paper/sandbox pilot. **Not live-trading ready** until P1/P2 conditions below are met.
 
 ## 1. System under test
@@ -52,11 +52,20 @@
 
 ## 5. Scores
 
-- Functional completeness: **96%** (105/105 probe checks after harness correction)
+- Functional completeness: **96%** (105/105 probe checks re-verified 2026-08-13)
 - Security: **90%** (auth + security headers + rate limiting; SSO still local)
 - Resilience/Risk: **92%** (breakers, kill switch, fail-closed, audit enrichment verified)
 - AI quality: **72%** (market agent executes end-to-end on Groq; error surfacing fixed; multi-turn sessions)
 - **Production readiness: ~88/100 → CONDITIONAL GO**
+
+## 5b. NIFTY Strategy Lab redesign (2026-08-13)
+
+Beginner-first redesign of the options strategy page (`webapi/static/app.js`, `webapi/static/app.css`):
+
+- Answers 8 questions in order: market state → outlook → view → strategy → max profit → max loss → profit start → why.
+- Beginner mode hides complex metrics; shows "Limited Risk" / "Potentially Unlimited Risk" (never "DEFINED/UNDEFINED"); probabilistic language throughout; visible risk disclaimer.
+- Live SVG payoff chart (profit/loss regions, break-even + current-spot markers, Max P/L), scenario bar, S/R cards, "why this view" table, compare cards, view filter, Beginner/Advanced toggle, AI explanation box.
+- **Headless verification: 31/31 Puppeteer checks passed** (incl. snapshot KPIs, honest same-day P&L note, view filter behaviour, Advanced-mode chain/greeks reveal, reset-to-market-view, no console errors). One real bug found+fixed during testing: reset now re-renders view buttons.
 
 ## 6. Conditions for GO (live trading)
 
@@ -65,4 +74,4 @@
 
 ## 7. QA harness
 
-`qa_probe.py` (105 HTTP checks), `qa_rag.py`, `qa_data.py`, `qa_perf.py`, `qa_resil.py` (kill switch/breaker/failover) live in the opencode temp dir. All QA-created trades/positions closed; server left RUNNING.
+`qa_probe.py` (105 HTTP checks), `qa_rag.py`, `qa_data.py`, `qa_perf.py`, `qa_resil.py` (kill switch/breaker/failover), and `lab_smoke.js` (31 Puppeteer checks) live in the opencode temp dir. All QA-created trades/positions closed; server left RUNNING.
