@@ -2496,15 +2496,15 @@
       el.innerHTML = `
         <div class="card" style="margin-top:14px"><div class="card-title">Profit &amp; Loss — ${esc(s.display)} ${tip("These are calculated from today's option prices at expiry. Actual results before expiry can differ because of time value, implied volatility and other factors.")}</div>
           <div class="lab-pnl" style="margin-top:12px">
-            <div class="lab-pnl-card ok"><div style="font-weight:700">💰 Maximum Profit</div>
+            <div class="lab-pnl-card ok"><div class="lab-step"><span class="n">5</span>How much can I make?</div><div style="font-weight:700">💰 Maximum Profit</div>
               <div class="val">${profitUnlimited ? "Unlimited" : fmtInr(s.max_profit)}</div>
               ${profitUnlimited ? '<p>Profit can keep increasing if NIFTY moves further in the favourable direction (reaches ₹' + fmtNum(s.max_profit, 0) + ' at the edge of this chart).</p>' : "<p>Best-case result if the move is large enough.</p>"}
             </div>
-            <div class="lab-pnl-card err"><div style="font-weight:700">🔴 Maximum Loss</div>
+            <div class="lab-pnl-card err"><div class="lab-step"><span class="n">6</span>How much can I lose?</div><div style="font-weight:700">🔴 Maximum Loss</div>
               <div class="val">${lossUnlimited ? "Potentially Unlimited" : fmtInr(-s.max_loss)}</div>
               ${lossUnlimited ? "<p>Your potential loss may increase substantially if the market moves against you.</p>" : "<p>Your maximum loss is known before entering the trade.</p>"}
             </div>
-            <div class="lab-pnl-card info"><div style="font-weight:700">📍 Profit Starts</div>
+            <div class="lab-pnl-card info"><div class="lab-step"><span class="n">7</span>Where does profit start?</div><div style="font-weight:700">📍 Profit Starts</div>
               <div class="val">${beDisplay(s)}</div>
               <p>At expiry, NIFTY generally needs to be ${bePhrase(s)} for the strategy to move into profit.</p>
             </div>
@@ -2517,6 +2517,7 @@
           ${riskHTML}
         </div>
         <div class="card" style="margin-top:14px">
+          <div class="lab-step"><span class="n">7</span>Where does profit start?</div>
           <div class="row" style="flex-wrap:wrap;gap:10px;align-items:center">
             <div class="card-title grow" style="margin:0">📍 Break-even</div>
             ${tip("Break-even is the approximate price where the strategy moves from loss to profit at expiry, based on the calculated payoff.")}
@@ -2527,7 +2528,7 @@
           <p class="muted small" style="margin-top:8px">At expiry, the strategy generally needs NIFTY ${bePhrase(s)} to move into profit. Real-world P&amp;L before expiry can differ because of time value, implied volatility and other factors.</p>
         </div>
         <div id="labPayoff" style="margin-top:14px"></div>
-        <div class="card" style="margin-top:14px"><div class="card-title">💡 In simple words</div>
+        <div class="card" style="margin-top:14px"><div class="lab-step"><span class="n">8</span>Why this strategy?</div><div class="card-title">💡 In simple words</div>
           <p style="font-size:16px;line-height:1.6;margin:8px 0 0;color:var(--text-2)">${esc(META[s.name].simple)}</p>
         </div>`;
       renderPayoff();
@@ -2571,6 +2572,7 @@
       const fit = fitFor(s.name, labState.view);
       el.innerHTML = `
         <div class="card lab-rec" style="margin-top:14px">
+          <div class="lab-step"><span class="n">4</span><span class="q">Which strategy matches that view?</span></div>
           <div class="card-title">🎯 Strategy Recommendation</div>
           ${labState.override ? '<div class="badge wait" style="margin-top:8px">You selected: ' + esc(v.hero) + ' — overrides the market view (' + esc(VIEWS[autoView].hero) + '). <button class="btn btn-soft" id="labResetView" style="margin-left:8px">Use market view</button></div>' : ""}
           <div class="row" style="flex-wrap:wrap;gap:16px;margin-top:10px;align-items:center">
@@ -2588,7 +2590,7 @@
           <div class="lab-rec-why"><b>Why this strategy?</b> ${esc(WHY[s.name])}</div>
         </div>`;
       const reset = document.getElementById("labResetView");
-      if (reset) reset.addEventListener("click", () => { labState.view = autoView; labState.override = false; renderViews(); renderRec(); renderFiltered(); renderAI(); });
+      if (reset) reset.addEventListener("click", () => { labState.view = autoView; labState.override = false; renderViews(); renderRec(); renderFiltered(); renderAI(); renderBottom(); });
     }
 
     function renderCompare() {
@@ -2641,6 +2643,7 @@
         renderRec();
         renderFiltered();
         renderAI();
+        renderBottom();
       }));
     }
 
@@ -2721,6 +2724,14 @@
         </div>`;
     }
 
+    function renderBottom() {
+      const el = document.getElementById("labBottom");
+      if (!el) return;
+      const v = VIEWS[labState.view];
+      const s = bestFor(labState.view);
+      el.innerHTML = "In one line: NIFTY looks <b>" + v.heroEmoji + " " + esc(v.hero) + "</b> based on current signals. The best-fit strategy is <span class=\"hl\">" + META[s.name].emoji + " " + esc(s.display) + "</span> — " + esc(META[s.name].whyFit) + ". This is an analysis of today's signals, not a prediction of the outcome.";
+    }
+
     function renderSnapshotChange() {
       const el = document.getElementById("labChange");
       if (!el) return;
@@ -2755,9 +2766,10 @@
       <div class="lab">
         <div class="row" style="flex-wrap:wrap;gap:14px;align-items:flex-start">
           <div class="grow">
-            <h1 class="lab-title">🧠 NIFTY Strategy Lab</h1>
+            <h1 class="lab-title">🧠 NIFTY Strategy Lab <span class="lab-version">v2 · Beginner Lab</span></h1>
             <div class="muted" style="margin-top:2px">Understand the market first. Choose the strategy second.</div>
             <div class="lab-expiry">NIFTY · <b>${esc(m.expiry)}</b> Expiry</div>
+            <div class="lab-bottomline" id="labBottom">…</div>
           </div>
           <div class="lab-mode" id="labMode" role="tablist" aria-label="View mode">
             <button data-lab-mode="beginner" class="sel">👤 Beginner</button>
@@ -2767,7 +2779,10 @@
 
         <div class="card" style="margin-top:16px">
           <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
-            <div class="card-title grow" style="margin:0">📊 NIFTY Market Snapshot</div>
+            <div class="grow">
+              <div class="lab-step"><span class="n">1</span><span class="q">What is NIFTY doing?</span></div>
+              <div class="card-title" style="margin:0">📊 NIFTY Market Snapshot</div>
+            </div>
             <span class="muted small">Data updated: ${esc(m.timestamp)}</span> ${staleBadge}
           </div>
           <div class="lab-kpis">
@@ -2781,6 +2796,7 @@
         </div>
 
         <div class="card lab-outlook ${v.color}" style="margin-top:14px">
+          <div class="lab-step"><span class="n">2</span><span class="q">What could happen next?</span></div>
           <div class="card-title">🔮 NIFTY Outlook</div>
           <div class="lab-outlook-big">${v.heroEmoji} ${esc(v.hero)}</div>
           <div class="lab-outlook-mean">${esc(v.meaning)}</div>
@@ -2795,6 +2811,7 @@
         </div>
 
         <div class="card" style="margin-top:14px">
+          <div class="lab-step"><span class="n">3</span><span class="q">What's my market view?</span></div>
           <div class="card-title">🎯 Possible NIFTY Scenarios</div>
           <div class="lab-zonebar" role="img" aria-label="Scenario map">
             <div class="zone bear" style="flex:0 0 ${supW}%">🔴<span>Below ${fmtNum(sup0, 0)}</span><small>Bearish Zone</small></div>
@@ -2811,6 +2828,7 @@
         </div>
 
         <div class="lab-sr" style="margin-top:14px">
+          <div class="lab-step">Key levels to watch</div>
           <div class="lab-sr-card ok"><div style="font-weight:700">🟢 Support</div>
             <div class="num">${fmtNum(sup0, 0)}</div>
             <p>A price area where buying interest may appear ${tip("Support is estimated from where option open interest (OI) is concentrated. It is an area of possible buying, not a guaranteed floor.")}</p>
@@ -2885,6 +2903,7 @@
     renderFiltered();
     renderViews();
     renderAI();
+    renderBottom();
 
     $$("#labMode button").forEach(btn => btn.addEventListener("click", () => {
       $$("#labMode button").forEach(x => x.classList.remove("sel"));
