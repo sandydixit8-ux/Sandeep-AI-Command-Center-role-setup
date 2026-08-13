@@ -36,10 +36,9 @@
 
 | # | Sev | Finding |
 |---|-----|---------|
-| F6 | P3 | Groq free-tier 8k TPM still limits multi-step runs; consider tier upgrade or Anthropic for richer contexts |
-| F7 | P3 | UI a11y debt (no `<form>` semantics) but good aria-label coverage |
+| F6 | P3 | Groq free-tier 8k TPM still limits multi-step runs — **MITIGATED** by D1 token pre-flight (`AGENT_LLM_REQUEST_BUDGET`); tier upgrade / provider switch is an operational decision, not a code defect. Tracked. |
 
-### Remediated this cycle (F1–F5, F8)
+### Remediated this cycle (F1–F5, F7, F8)
 
 | # | Sev | Finding | Fix |
 |---|-----|---------|-----|
@@ -48,6 +47,7 @@
 | F3 | P3 | No API rate limiting | **FIXED**: in-memory fixed-window limiter per client (`AGENT_RATE_LIMIT_RPM`, default 600) → 429 + Retry-After (verified live) |
 | F4 | P3 | Execution audit records sparse | **FIXED**: audit now includes structured `side/symbol/quantity` (parsed from detail) + `blocked_by` |
 | F5 | P3 | Breaker dual-gate divergence | **FIXED**: `check_open` now blocks immediately when tripped for the day (matches `is_tripped()`), reducing orders still allowed |
+| F7 | P3 | UI a11y debt: chat composer had no `<form>` semantics | **FIXED**: composer wrapped in `<form id="chatForm">` with submit handler, textarea labelled "Message to your AI agent", send button `type="submit"`, all tool buttons `type="button"`. Verified headless: Enter submits exactly once (no double-fire) |
 | F8 | P2 | No conversation persistence — every `/run` starts a fresh agent | **FIXED**: optional `session_id` on `/api/v1/run` + `/run/stream` keeps one agent alive across turns (history/memory persist, TTL `AGENT_SESSION_TTL_MIN` default 30m, per-session lock serializes turns). New endpoints `GET /api/v1/conversations`, `GET/DELETE /api/v1/conversations/{id}` (sanitized history: user/assistant only). Without `session_id` behavior is unchanged (stateless) |
 
 ## 5. Scores
@@ -70,7 +70,7 @@ Beginner-first redesign of the options strategy page (`webapi/static/app.js`, `w
 ## 6. Conditions for GO (live trading)
 
 1. Re-verify broker fail-closed paths on a live (non-sandbox) Upstox account with `LIVE_TRADING_ENABLED=true`.
-2. Optional: raise provider rate tier (F6); consider a11y pass on chat form (F7).
+2. Optional: raise provider rate tier (F6) if richer multi-step runs are needed.
 
 ## 7. QA harness
 

@@ -459,18 +459,18 @@
       <div class="chat-wrap">
         <div class="chat-scroll" id="chatScroll"></div>
         <div class="composer">
-          <div class="composer-inner" style="position:relative">
-            <textarea id="chatInput" rows="1" placeholder="Ask your AI agent…" aria-label="Message"></textarea>
+          <form class="composer-inner" id="chatForm" style="position:relative" aria-label="Send a message to your AI agent">
+            <textarea id="chatInput" rows="1" placeholder="Ask your AI agent…" aria-label="Message to your AI agent"></textarea>
             <div class="attach-list" id="attachList"></div>
             <div class="composer-tools">
-              <button class="btn btn-icon" id="attachBtn" title="Attach file" aria-label="Attach file">📎</button>
-              <button class="btn btn-icon" id="imgBtn" title="Upload image" aria-label="Upload image">🖼️</button>
-              <button class="btn btn-icon" id="micBtn" title="Voice input (coming soon)" aria-label="Voice">🎤</button>
-              <button class="agent-chip" id="agentPicker">🤖 <span id="agentPickerLabel"></span> ▾</button>
-              <button class="btn btn-primary composer-send" id="chatSend">Send</button>
+              <button type="button" class="btn btn-icon" id="attachBtn" title="Attach file" aria-label="Attach file">📎</button>
+              <button type="button" class="btn btn-icon" id="imgBtn" title="Upload image" aria-label="Upload image">🖼️</button>
+              <button type="button" class="btn btn-icon" id="micBtn" title="Voice input (coming soon)" aria-label="Voice">🎤</button>
+              <button type="button" class="agent-chip" id="agentPicker">🤖 <span id="agentPickerLabel"></span> ▾</button>
+              <button type="submit" class="btn btn-primary composer-send" id="chatSend">Send</button>
             </div>
             <div class="selector-pop hidden" id="agentSelector"></div>
-          </div>
+          </form>
         </div>
       </div>`;
 
@@ -482,7 +482,7 @@
     const input = $("#chatInput");
     input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 180) + "px"; });
     input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
-    $("#chatSend").addEventListener("click", sendChat);
+    $("#chatForm").addEventListener("submit", e => { e.preventDefault(); sendChat(); });
     $("#attachBtn").addEventListener("click", () => openFilePicker());
     $("#imgBtn").addEventListener("click", () => openFilePicker(true));
     $("#micBtn").addEventListener("click", () => toast("Voice input", "Voice recording is coming soon.", "warn"));
