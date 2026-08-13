@@ -98,8 +98,11 @@ async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
     for name, value in _SECURITY_HEADERS.items():
         response.headers[name] = value
-    if request.url.path.startswith("/api/"):
+    path = request.url.path
+    if path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
+    elif path.startswith("/static/") or path in ("/", "/index.html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
 
