@@ -2670,9 +2670,16 @@
         byStrike[c.strike][c.option_type] = c;
       });
       const strikes = Object.keys(byStrike).map(Number).sort((x, y) => Math.abs(x - m.spot) - Math.abs(y - m.spot)).slice(0, 6).sort((x, y) => x - y);
+      const gNum = (v, d) => (v === undefined || v === null || Number.isNaN(v)) ? "—" : Number(v).toFixed(d);
+      const gGamma = (v) => (v === undefined || v === null || Number.isNaN(v)) ? "—" : (Math.abs(v) > 0 && Math.abs(v) < 0.0001) ? Number(v).toExponential(1) : Number(v).toFixed(4);
       const rows = strikes.map(k => {
         const ce = byStrike[k].CE, pe = byStrike[k].PE;
-        const cell = (c) => c ? fmtNum(c.ltp, 1) + '<div class="muted small">IV ' + (c.iv ? (c.iv * 100).toFixed(1) + "%" : "—") + " · ΔOI " + (c.change_oi >= 0 ? "+" : "") + fmtNum(c.change_oi, 0) + "</div>" : "—";
+        const cell = (c) => c ? fmtNum(c.ltp, 1) + '<div class="muted small">IV ' + (c.iv ? (c.iv * 100).toFixed(1) + "%" : "—") + " · ΔOI " + (c.change_oi >= 0 ? "+" : "") + fmtNum(c.change_oi, 0) + '</div>'
+          + '<div class="muted small">Δ ' + gNum(c.delta, 2) + ' ' + tip("Delta estimates how much an option's price may change when NIFTY moves by 1 point.")
+          + ' · Γ ' + gGamma(c.gamma) + ' ' + tip("Gamma shows how much Delta itself changes as NIFTY moves.")
+          + ' · Θ ' + gNum(c.theta, 2) + ' ' + tip("Theta represents the effect of time passing on an option's value.")
+          + ' · V ' + gNum(c.vega, 2) + ' ' + tip("Vega shows how an option's price reacts to a 1% change in implied volatility.")
+          + '</div>' : "—";
         return '<tr><td><b>' + fmtNum(k, 0) + '</b></td><td>' + cell(ce) + '</td><td>' + cell(pe) + '</td></tr>';
       }).join("");
       const greeksTip = (name, g, t) => name + " " + tip(t);
@@ -2697,6 +2704,7 @@
               <div class="spread"><span class="muted">PCR (Volume)</span><span>${pcr.pcr_volume ?? "—"}</span></div>
               <div class="spread"><span class="muted">ATM IV</span><span>${iv.atm_iv ? (iv.atm_iv * 100).toFixed(1) + "%" : "—"}</span></div>
               <div class="spread"><span class="muted">IV regime</span><span>${esc(iv.regime || "—")}</span></div>
+              <div class="spread"><span class="muted">IV Rank ${tip("IV Rank compares current IV to its own history. It is not available from the current feed, so it is not shown rather than estimated.")}</span><span>—</span></div>
               <div class="spread"><span class="muted">Max pain</span><span>${fmtNum((an.max_pain || {}).max_pain, 0)}</span></div>
               <div class="spread"><span class="muted">Expected move</span><span>${fmtNum(exp.lower, 0)} – ${fmtNum(exp.upper, 0)}</span></div>
               <div class="spread"><span class="muted">CE OI / PE OI</span><span>${fmtNum((an.oi || {}).total_ce_oi, 0)} / ${fmtNum((an.oi || {}).total_pe_oi, 0)}</span></div>
